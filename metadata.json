@@ -1,0 +1,7 @@
+{
+  "name": "JARVIS Arc Reactor Voice Assistant",
+  "description": "Futuristic Iron Man Arc Reactor powered AI voice assistant with real-time voice recognition, intelligent tool execution, and dynamic holographic HUD interface.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

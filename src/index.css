@@ -1,0 +1,221 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-orbitron: 'Orbitron', system-ui, sans-serif;
+    --font-rajdhani: 'Rajdhani', system-ui, sans-serif;
+    --font-mono: 'Share Tech Mono', 'Courier New', monospace;
+    --font-chakra: 'Chakra Petch', sans-serif;
+    --color-arc-cyan: #22d3ee;
+    --color-arc-blue: #0284c7;
+    --color-arc-core: #e0f2fe;
+    --color-arc-glow: rgba(34, 211, 238, 0.45);
+    --color-arc-amber: #fb923c;
+    --color-arc-green: #4ade80;
+    --color-arc-red: #f87171;
+  }
+
+  body {
+    background-color: #02040a;
+    background-image: 
+      radial-gradient(circle, #0891b2 1px, transparent 1px),
+      radial-gradient(circle at 50% 50%, rgba(8, 145, 178, 0.08) 0%, transparent 70%);
+    background-size: 20px 20px, 100% 100%;
+    color: #22d3ee;
+    font-family: var(--font-rajdhani);
+    overflow-x: hidden;
+  }
+}
+
+.font-orbitron {
+  font-family: var(--font-orbitron);
+}
+
+.font-rajdhani {
+  font-family: var(--font-rajdhani);
+}
+
+.font-mono-tech {
+  font-family: var(--font-mono);
+}
+
+.font-chakra {
+  font-family: var(--font-chakra);
+}
+
+/* Elegant Dark Theme Glows & Lighting */
+.reactor-glow {
+  box-shadow: 0 0 40px rgba(34, 211, 238, 0.4), inset 0 0 20px rgba(34, 211, 238, 0.2);
+}
+
+.core-glow {
+  box-shadow: 0 0 60px rgba(34, 211, 238, 0.8), 0 0 100px rgba(34, 211, 238, 0.3);
+}
+
+.glow-cyan {
+  text-shadow: 0 0 10px rgba(34, 211, 238, 0.7), 0 0 20px rgba(34, 211, 238, 0.4);
+}
+
+.glow-cyan-box {
+  box-shadow: 0 0 15px rgba(34, 211, 238, 0.35), inset 0 0 15px rgba(34, 211, 238, 0.15);
+}
+
+.glow-cyan-box-intense {
+  box-shadow: 0 0 35px rgba(34, 211, 238, 0.65), inset 0 0 25px rgba(34, 211, 238, 0.35);
+}
+
+.glow-amber-box {
+  box-shadow: 0 0 20px rgba(251, 146, 60, 0.4), inset 0 0 10px rgba(251, 146, 60, 0.2);
+}
+
+.glow-green-box {
+  box-shadow: 0 0 20px rgba(74, 222, 128, 0.5), inset 0 0 10px rgba(74, 222, 128, 0.3);
+}
+
+.glow-red-box {
+  box-shadow: 0 0 20px rgba(248, 113, 113, 0.5), inset 0 0 10px rgba(248, 113, 113, 0.3);
+}
+
+/* Elegant HUD Lines & Patterns */
+.hud-line {
+  background: linear-gradient(90deg, transparent, rgba(34, 211, 238, 0.5), transparent);
+}
+
+.hud-line-subtle {
+  background: linear-gradient(90deg, transparent, rgba(8, 145, 178, 0.3), transparent);
+}
+
+.hex-bg {
+  background-color: transparent;
+  background-image: radial-gradient(circle, #0891b2 1px, transparent 1px);
+  background-size: 20px 20px;
+  opacity: 0.12;
+}
+
+/* HUD Panels with Corner Accents */
+.hud-panel {
+  background: rgba(2, 4, 10, 0.85);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(34, 211, 238, 0.22);
+  position: relative;
+}
+
+.hud-panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 6px;
+  border-top: 2px solid #22d3ee;
+  border-left: 2px solid #22d3ee;
+}
+
+.hud-panel::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border-bottom: 2px solid #22d3ee;
+  border-right: 2px solid #22d3ee;
+}
+
+/* Scanline Effect */
+.scanlines {
+  background: linear-gradient(
+    to bottom,
+    rgba(255,255,255,0),
+    rgba(255,255,255,0) 50%,
+    rgba(0, 0, 0, 0.25) 50%,
+    rgba(0, 0, 0, 0.25)
+  );
+  background-size: 100% 4px;
+}
+
+/* Animations */
+@keyframes spinClockwise {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes spinCounterClockwise {
+  from { transform: rotate(360deg); }
+  to { transform: rotate(0deg); }
+}
+
+@keyframes pulseCore {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.92;
+    filter: drop-shadow(0 0 25px rgba(34, 211, 238, 0.8));
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 1;
+    filter: drop-shadow(0 0 45px rgba(34, 211, 238, 1)) drop-shadow(0 0 80px rgba(8, 145, 178, 0.7));
+  }
+}
+
+@keyframes pulseFast {
+  0%, 100% {
+    transform: scale(0.98);
+    opacity: 0.88;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+}
+
+.animate-spin-slow {
+  animation: spinClockwise 30s linear infinite;
+}
+
+.animate-spin-reverse-slow {
+  animation: spinCounterClockwise 25s linear infinite;
+}
+
+.animate-spin-medium {
+  animation: spinClockwise 12s linear infinite;
+}
+
+.animate-spin-reverse-medium {
+  animation: spinCounterClockwise 10s linear infinite;
+}
+
+.animate-spin-fast {
+  animation: spinClockwise 3s linear infinite;
+}
+
+.animate-spin-reverse-fast {
+  animation: spinCounterClockwise 2.5s linear infinite;
+}
+
+.animate-core-pulse {
+  animation: pulseCore 3.5s ease-in-out infinite;
+}
+
+.animate-core-active {
+  animation: pulseFast 0.8s ease-in-out infinite;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(2, 4, 10, 0.8);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(34, 211, 238, 0.35);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(34, 211, 238, 0.65);
+}
