@@ -34,22 +34,34 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Verify production files
+      - name: Prepare GitHub Pages site
         run: |
-          echo "=== DIST CONTENTS ==="
-          find dist -maxdepth 3 -type f -print
-          echo "=== INDEX.HTML ==="
-          cat dist/index.html
+          rm -rf site
+          mkdir -p site
+          cp -r dist/. site/
+
+          touch site/.nojekyll
+
+          echo "=== PAGES SITE ==="
+          find site -maxdepth 3 -type f -print
+
           echo "=== ASSETS ==="
-          ls -lah dist/assets
+          ls -lah site/assets
+
+      - name: Verify asset files
+        run: |
+          test -f site/index.html
+          test -f site/assets/index-PyY-iPzW.js
+          test -f site/assets/index-Dyvi6G26.css
+          echo "JARVIS frontend files verified successfully."
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload production build
+      - name: Upload Pages site
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./dist
+          path: ./site
 
   deploy:
     name: Deploy to GitHub Pages
@@ -61,6 +73,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Deploy to GitHub Pages
+      - name: Deploy JARVIS
         id: deployment
         uses: actions/deploy-pages@v4
