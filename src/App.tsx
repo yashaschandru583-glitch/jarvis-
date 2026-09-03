@@ -183,35 +183,105 @@ export default function App() {
     setIsBooting(true);
   };
 
+  // Request locking, deduplication, and streaming management refs
+  const isProcessingRef = useRef<boolean>(false);
+  const activePromptNormalizedRef = useRef<string | null>(null);
+  const activeRequestIdRef = useRef<string | null>(null);
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
+  const lastSubmittedTranscriptRef = useRef<string>('');
+  const lastSubmittedTimeRef = useRef<number>(0);
+
   // Stop vocal and speech recognition
   const handleStop = useCallback(() => {
+    if (activeAbortControllerRef.current) {
+      activeAbortControllerRef.current.abort();
+      activeAbortControllerRef.current = null;
+    }
+    activeRequestIdRef.current = null;
+    isProcessingRef.current = false;
+    activePromptNormalizedRef.current = null;
     stopSpeechRecognition();
     stopJarvisSpeech();
     setState('idle');
     setAudioLevel(0);
     setLiveTranscript('');
+    setCurrentMessage(null);
     soundFx.playClick(settings.soundEffects);
   }, [settings.soundEffects]);
 
   // Process directive with ultra-low-latency streaming pipeline
   const processDirective = async (prompt: string) => {
-    if (!prompt.trim()) return;
+    const cleanPrompt = prompt.trim();
+    if (!cleanPrompt) return;
+
+    const normalized = cleanPrompt.toLowerCase().replace(/\s+/g, ' ').replace(/[.,!?]+$/, '');
+    const now = Date.now();
+
+    // 1. TRANSCRIPT DEDUPLICATION: Ignore duplicate command within 3s window
+    if (
+      normalized === lastSubmittedTranscriptRef.current &&
+      now - lastSubmittedTimeRef.current < 3000
+    ) {
+      console.log(`[JARVIS DEDUPLICATION] Duplicate directive ignored within 3s: "${cleanPrompt}"`);
+      return;
+    }
+
+    // 2. REQUEST LOCK: If already processing the EXACT SAME command, reject duplicate
+    if (isProcessingRef.current && normalized === activePromptNormalizedRef.current) {
+      console.log(`[JARVIS REQUEST LOCK] Already processing this directive, ignoring duplicate.`);
+      return;
+    }
+
+    // 3. User intentionally interrupting with a new directive while processing or speaking
+    if (isProcessingRef.current) {
+      console.log(`[JARVIS INTERRUPT] Interrupting active directive with new directive: "${cleanPrompt}"`);
+      if (activeAbortControllerRef.current) {
+        activeAbortControllerRef.current.abort();
+        activeAbortControllerRef.current = null;
+      }
+      stopJarvisSpeech();
+      stopSpeechRecognition();
+    }
+
+    // Update trackers and acquire request lock
+    lastSubmittedTranscriptRef.current = normalized;
+    lastSubmittedTimeRef.current = now;
+    activePromptNormalizedRef.current = normalized;
+    isProcessingRef.current = true;
+
+    // Create unique request ID for this interaction
+    const requestId =
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    activeRequestIdRef.current = requestId;
+
+    console.log(`[JARVIS] REQUEST CREATED\nrequestId: ${requestId}\nprompt: "${cleanPrompt}"`);
+
+    // Create and attach single AbortController for this stream
+    const abortController = new AbortController();
+    activeAbortControllerRef.current = abortController;
 
     // Interrupt any active voice playback immediately
     stopJarvisSpeech();
+    stopSpeechRecognition();
 
-    // Create and display User Directive instantly
+    // Create and display User Directive message with unique ID
+    const userMsgId = `user-${requestId}`;
     const userMsg: Message = {
-      id: `msg-${Date.now()}`,
+      id: userMsgId,
       role: 'user',
-      content: prompt,
+      content: cleanPrompt,
       timestamp: Date.now(),
     };
 
-    setMessages((prev) => [...prev, userMsg]);
-    setCurrentMessage(userMsg);
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === userMsgId)) return prev;
+      return [...prev, userMsg];
+    });
+
     setLiveTranscript('');
-    setState('thinking'); // Immediate processing state — 0ms delay!
+    setState('thinking');
     soundFx.playProcessingPulse(settings.soundEffects);
 
     const initSteps: ExecutionStep[] = [
@@ -221,7 +291,7 @@ export default function App() {
     ];
     setExecutionSteps(initSteps);
 
-    const assistantMsgId = `msg-${Date.now() + 1}`;
+    const assistantMsgId = `asst-${requestId}`;
     let accumulatedText = '';
     let toolUsedData: ToolExecution | undefined = undefined;
     let sourcesData: any[] | undefined = undefined;
@@ -237,40 +307,62 @@ export default function App() {
           volume: settings.voiceVolume,
           preferredVoice: settings.preferredVoice,
           onStart: () => {
-            setState('speaking');
+            if (activeRequestIdRef.current === requestId) {
+              console.log(`[JARVIS] TTS STARTED\nrequestId: ${requestId}`);
+              setState('speaking');
+            }
           },
-          onAudioLevel: (lvl) => setAudioLevel(lvl),
+          onAudioLevel: (lvl) => {
+            if (activeRequestIdRef.current === requestId) {
+              setAudioLevel(lvl);
+            }
+          },
           onInterrupted: () => {
-            setState('interrupted');
-            setAudioLevel(0);
+            if (activeRequestIdRef.current === requestId) {
+              setState('interrupted');
+              setAudioLevel(0);
+            }
           },
           onEnd: () => {
-            setState('idle');
-            setAudioLevel(0);
-            if (settings.autoListen) {
-              handleActivateMic();
+            if (activeRequestIdRef.current === requestId) {
+              console.log(`[JARVIS] TTS COMPLETED\nrequestId: ${requestId}`);
+              setState('idle');
+              setAudioLevel(0);
+              if (settings.autoListen) {
+                setTimeout(() => {
+                  if (activeRequestIdRef.current === requestId && !isProcessingRef.current) {
+                    handleActivateMic();
+                  }
+                }, 200);
+              }
             }
           },
         },
-        aiStartTime
+        aiStartTime,
+        requestId
       );
     }
 
     try {
+      console.log(`[JARVIS] AI REQUEST SENT\nrequestId: ${requestId}`);
       const memoryLimit = settings.contextMemory || 10;
       const res = await fetch('/api/assistant/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt,
+          requestId,
+          prompt: cleanPrompt,
           history: messages.slice(-memoryLimit).map((m) => ({ role: m.role, content: m.content })),
           style: settings.aiStyle,
         }),
+        signal: abortController.signal,
       });
 
       if (!res.ok || !res.body) {
         throw new Error(`Server returned stream error: ${res.status}`);
       }
+
+      console.log(`[JARVIS] STREAM STARTED\nrequestId: ${requestId}`);
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -279,6 +371,11 @@ export default function App() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+
+        if (activeRequestIdRef.current !== requestId || abortController.signal.aborted) {
+          reader.cancel().catch(() => {});
+          return;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         const parts = buffer.split('\n\n');
@@ -297,9 +394,9 @@ export default function App() {
               if (event.type === 'token' && typeof event.delta === 'string') {
                 accumulatedText += event.delta;
 
-                // Immediate switch to speaking state on first token arrival
                 if (!hasStartedVoice) {
                   hasStartedVoice = true;
+                  console.log(`[JARVIS] FIRST TOKEN\nrequestId: ${requestId}`);
                   const firstTokenTime = performance.now();
                   const aiLatency = parseFloat(((firstTokenTime - aiStartTime) / 1000).toFixed(2));
                   ttsService.setMetrics({
@@ -310,7 +407,7 @@ export default function App() {
                   soundFx.playProcessingPulse(settings.soundEffects);
                 }
 
-                // Progressive UI display
+                // Progressive UI display for single in-flight assistant response
                 const progressiveMsg: Message = {
                   id: assistantMsgId,
                   role: 'assistant',
@@ -321,7 +418,6 @@ export default function App() {
                 };
                 setCurrentMessage(progressiveMsg);
 
-                // Progressive Text-to-Speech token feeding
                 if (settings.voiceEnabled) {
                   streamingSpeaker.pushToken(event.delta);
                 }
@@ -334,8 +430,6 @@ export default function App() {
                   status: 'success',
                 };
                 setActiveTool(toolUsedData);
-
-                // Dispatch desktop application/website control if tool matches
                 dispatchDesktopActionFromTool(event.tool);
 
                 if (event.tool.name === 'manage_stark_task') {
@@ -373,6 +467,12 @@ export default function App() {
         }
       }
 
+      console.log(`[JARVIS] STREAM COMPLETED\nrequestId: ${requestId}`);
+
+      if (activeRequestIdRef.current !== requestId || abortController.signal.aborted) {
+        return;
+      }
+
       // Finish streaming TTS chunk queue
       if (settings.voiceEnabled) {
         streamingSpeaker.finishStream();
@@ -380,6 +480,7 @@ export default function App() {
         setState('idle');
       }
 
+      // Commit finalized assistant message to history
       const finalAssistantMsg: Message = {
         id: assistantMsgId,
         role: 'assistant',
@@ -389,46 +490,73 @@ export default function App() {
         timestamp: Date.now(),
       };
 
-      setMessages((prev) => [...prev, finalAssistantMsg]);
-      setCurrentMessage(finalAssistantMsg);
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === assistantMsgId);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = finalAssistantMsg;
+          return updated;
+        }
+        return [...prev, finalAssistantMsg];
+      });
+
+      // Clear currentMessage so it NEVER renders twice alongside the finalized message
+      setCurrentMessage(null);
 
       setExecutionSteps((prev) => [
         ...prev,
         { stage: 'completed', label: 'Protocol Completed', timestamp: Date.now() },
       ]);
+      console.log(`[JARVIS] REQUEST FINISHED\nrequestId: ${requestId}`);
     } catch (err: any) {
+      if (err.name === 'AbortError' || activeRequestIdRef.current !== requestId) {
+        console.log(`[JARVIS] Request aborted or superseded: ${requestId}`);
+        return;
+      }
+
       console.warn('Streaming failed, invoking standard assistant endpoint:', err);
-      // Fallback to non-streaming endpoint if SSE stream fails
       try {
         const fbRes = await fetch('/api/assistant/interact', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            prompt,
+            requestId,
+            prompt: cleanPrompt,
             history: messages.slice(-4).map((m) => ({ role: m.role, content: m.content })),
             style: settings.aiStyle,
           }),
+          signal: abortController.signal,
         });
 
-        if (fbRes.ok) {
+        if (fbRes.ok && activeRequestIdRef.current === requestId) {
           const fbData = await fbRes.json();
           const fallbackMsg: Message = {
             id: assistantMsgId,
             role: 'assistant',
             content: fbData.reply,
             sources: fbData.sources,
-            toolExecution: fbData.toolUsed ? {
-              name: fbData.toolUsed.name,
-              displayName: fbData.toolUsed.name.replace(/_/g, ' ').toUpperCase(),
-              args: fbData.toolUsed.args,
-              result: fbData.toolUsed.result,
-              status: 'success',
-            } : undefined,
+            toolExecution: fbData.toolUsed
+              ? {
+                  name: fbData.toolUsed.name,
+                  displayName: fbData.toolUsed.name.replace(/_/g, ' ').toUpperCase(),
+                  args: fbData.toolUsed.args,
+                  result: fbData.toolUsed.result,
+                  status: 'success',
+                }
+              : undefined,
             timestamp: Date.now(),
           };
 
-          setMessages((prev) => [...prev, fallbackMsg]);
-          setCurrentMessage(fallbackMsg);
+          setMessages((prev) => {
+            const idx = prev.findIndex((m) => m.id === assistantMsgId);
+            if (idx >= 0) {
+              const updated = [...prev];
+              updated[idx] = fallbackMsg;
+              return updated;
+            }
+            return [...prev, fallbackMsg];
+          });
+          setCurrentMessage(null);
 
           if (fbData.toolUsed) {
             dispatchDesktopActionFromTool(fbData.toolUsed);
@@ -436,35 +564,62 @@ export default function App() {
 
           if (settings.voiceEnabled) {
             setState('speaking');
-            speakJarvis(fbData.reply, {
-              pitch: settings.voicePitch,
-              rate: settings.voiceRate,
-              volume: settings.voiceVolume,
-              preferredVoice: settings.preferredVoice,
-              onAudioLevel: (lvl) => setAudioLevel(lvl),
-              onEnd: () => {
-                setState('idle');
-                setAudioLevel(0);
+            speakJarvis(
+              fbData.reply,
+              {
+                pitch: settings.voicePitch,
+                rate: settings.voiceRate,
+                volume: settings.voiceVolume,
+                preferredVoice: settings.preferredVoice,
+                onAudioLevel: (lvl) => setAudioLevel(lvl),
+                onEnd: () => {
+                  setState('idle');
+                  setAudioLevel(0);
+                },
               },
-            });
+              requestId
+            );
           } else {
             setState('idle');
           }
+          console.log(`[JARVIS] REQUEST FINISHED\nrequestId: ${requestId}`);
           return;
         }
-      } catch (_) {}
+      } catch (fbErr: any) {
+        if (fbErr.name === 'AbortError' || activeRequestIdRef.current !== requestId) return;
+      }
 
-      setState('error');
-      soundFx.playError(settings.soundEffects);
-      const errorMsg: Message = {
-        id: assistantMsgId,
-        role: 'assistant',
-        content: `My apologies, sir. An anomaly occurred in the execution matrix: ${err.message || 'Unknown exception'}.`,
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => [...prev, errorMsg]);
-      setCurrentMessage(errorMsg);
-      setTimeout(() => setState('idle'), 1000);
+      if (activeRequestIdRef.current === requestId) {
+        setState('error');
+        soundFx.playError(settings.soundEffects);
+        const errorMsg: Message = {
+          id: assistantMsgId,
+          role: 'assistant',
+          content: `My apologies, sir. An anomaly occurred in the execution matrix: ${err.message || 'Unknown exception'}.`,
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => {
+          const idx = prev.findIndex((m) => m.id === assistantMsgId);
+          if (idx >= 0) {
+            const updated = [...prev];
+            updated[idx] = errorMsg;
+            return updated;
+          }
+          return [...prev, errorMsg];
+        });
+        setCurrentMessage(null);
+        setTimeout(() => {
+          if (activeRequestIdRef.current === requestId) setState('idle');
+        }, 1000);
+      }
+    } finally {
+      if (activeRequestIdRef.current === requestId) {
+        isProcessingRef.current = false;
+        activePromptNormalizedRef.current = null;
+        if (activeAbortControllerRef.current === abortController) {
+          activeAbortControllerRef.current = null;
+        }
+      }
     }
   };
 
@@ -472,8 +627,7 @@ export default function App() {
   const handleActivateMic = () => {
     ttsService.unlockAudioContext();
     if (state === 'speaking' || ttsService.getMetrics().voiceActive) {
-      // Immediate zero-delay interruption protocol
-      ttsService.interrupt();
+      stopJarvisSpeech();
       setState('interrupted');
       setAudioLevel(0);
       soundFx.playClick(settings.soundEffects);
@@ -484,7 +638,8 @@ export default function App() {
   };
 
   const armMicrophone = () => {
-    handleStop();
+    stopJarvisSpeech();
+    stopSpeechRecognition();
     soundFx.playReactorCharge(settings.soundEffects);
     setState('listening');
     setLiveTranscript('');
@@ -494,11 +649,15 @@ export default function App() {
         setState('listening');
       },
       onResult: (transcript, isFinal) => {
-        setLiveTranscript(transcript);
-        if (isFinal && transcript.trim()) {
-          stopSpeechRecognition();
-          processDirective(transcript.trim());
+        if (!isFinal) {
+          // Interim transcription updates display view only
+          setLiveTranscript(transcript);
+          return;
         }
+        // Final transcript: submit directive ONCE
+        setLiveTranscript(transcript);
+        stopSpeechRecognition();
+        processDirective(transcript.trim());
       },
       onAudioLevel: (lvl) => {
         setAudioLevel(lvl);
@@ -510,9 +669,11 @@ export default function App() {
         setTimeout(() => setState('idle'), 1800);
       },
       onEnd: () => {
-        // If ended without final result while still listening
-        if (state === 'listening' && liveTranscript.trim()) {
-          processDirective(liveTranscript.trim());
+        // Do NOT submit any directive here!
+        // The final transcript is handled strictly by onResult(..., true).
+        if (!isProcessingRef.current) {
+          setState((curr) => (curr === 'listening' ? 'idle' : curr));
+          setAudioLevel(0);
         }
       },
     });

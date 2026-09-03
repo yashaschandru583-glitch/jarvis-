@@ -16,6 +16,8 @@ let micAnalyser: AnalyserNode | null = null;
 let micStream: MediaStream | null = null;
 let micAnimFrame: number | null = null;
 let silenceTimer: any = null;
+let currentSessionId = 0;
+let hasSubmittedFinalForSession = false;
 
 export function isSpeechRecognitionSupported(): boolean {
   if (typeof window === 'undefined') return false;
@@ -35,6 +37,9 @@ export function startSpeechRecognition(callbacks: SpeechListenerCallbacks) {
     // Stop any previous recognition instance
     stopSpeechRecognition();
 
+    const sessionId = ++currentSessionId;
+    hasSubmittedFinalForSession = false;
+
     const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     recognitionInstance = new SpeechRec();
     recognitionInstance.continuous = true;
@@ -44,23 +49,39 @@ export function startSpeechRecognition(callbacks: SpeechListenerCallbacks) {
     let hasReceivedSpeech = false;
     let latestTranscript = '';
 
+    // Guard to ensure final transcript is submitted AT MOST ONCE per speech session
+    const submitFinalOnce = (finalText: string) => {
+      if (hasSubmittedFinalForSession || sessionId !== currentSessionId) return;
+      hasSubmittedFinalForSession = true;
+
+      if (silenceTimer) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+      }
+
+      stopSpeechRecognition();
+      callbacks.onResult?.(finalText.trim(), true);
+    };
+
     const resetSilenceTimer = () => {
       if (silenceTimer) clearTimeout(silenceTimer);
-      // Fast, responsive finalization on speech pause (350ms instead of 750ms)
+      // Fast, responsive finalization on speech pause (400ms pause)
       silenceTimer = setTimeout(() => {
-        if (hasReceivedSpeech && latestTranscript.trim()) {
-          stopSpeechRecognition();
-          callbacks.onResult?.(latestTranscript.trim(), true);
+        if (hasReceivedSpeech && latestTranscript.trim() && !hasSubmittedFinalForSession) {
+          submitFinalOnce(latestTranscript.trim());
         }
-      }, 350);
+      }, 400);
     };
 
     recognitionInstance.onstart = () => {
+      if (sessionId !== currentSessionId) return;
       callbacks.onStart?.();
       setupMicAudioAnalysis(callbacks.onAudioLevel);
     };
 
     recognitionInstance.onresult = (event: any) => {
+      if (sessionId !== currentSessionId || hasSubmittedFinalForSession) return;
+
       let interimTranscript = '';
       let finalTranscript = '';
 
@@ -76,32 +97,39 @@ export function startSpeechRecognition(callbacks: SpeechListenerCallbacks) {
       if (activeText) {
         hasReceivedSpeech = true;
         latestTranscript = activeText;
+        // Interim transcription ONLY updates UI display
         callbacks.onResult?.(activeText, false);
         resetSilenceTimer();
       }
 
       if (finalTranscript.trim()) {
-        if (silenceTimer) clearTimeout(silenceTimer);
-        stopSpeechRecognition();
-        callbacks.onResult?.(finalTranscript.trim(), true);
+        submitFinalOnce(finalTranscript.trim());
       }
     };
 
     recognitionInstance.onerror = (event: any) => {
+      if (sessionId !== currentSessionId) return;
       if (event.error === 'no-speech') {
         // Ignorable background silence
         return;
       }
       console.warn('Speech recognition notice:', event.error);
-      if (silenceTimer) clearTimeout(silenceTimer);
+      if (silenceTimer) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+      }
       callbacks.onError?.(event.error || 'Microphone error');
       cleanupMicAudio();
     };
 
     recognitionInstance.onend = () => {
-      if (silenceTimer) clearTimeout(silenceTimer);
-      if (hasReceivedSpeech && latestTranscript.trim()) {
-        callbacks.onResult?.(latestTranscript.trim(), true);
+      if (sessionId !== currentSessionId) return;
+      if (silenceTimer) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+      }
+      if (hasReceivedSpeech && latestTranscript.trim() && !hasSubmittedFinalForSession) {
+        submitFinalOnce(latestTranscript.trim());
       }
       callbacks.onEnd?.();
       cleanupMicAudio();
@@ -186,8 +214,8 @@ import { ttsService, TTSOptions, selectBritishMaleVoice } from './ttsService';
 export type JarvisSpeechOptions = TTSOptions;
 
 export const streamingSpeaker = {
-  start(options: TTSOptions = {}, aiStartTime?: number) {
-    ttsService.startStreaming(options, aiStartTime);
+  start(options: TTSOptions = {}, aiStartTime?: number, requestId?: string) {
+    ttsService.startStreaming(options, aiStartTime, requestId);
   },
   pushToken(token: string) {
     ttsService.pushToken(token);
@@ -210,9 +238,10 @@ export function getAvailableVoices(): SpeechSynthesisVoice[] {
 
 export function speakJarvis(
   text: string,
-  options: TTSOptions = {}
+  options: TTSOptions = {},
+  requestId?: string
 ) {
-  ttsService.speak(text, options);
+  ttsService.speak(text, options, requestId);
 }
 
 export function stopJarvisSpeech() {

@@ -1402,13 +1402,51 @@ app.all('/api/tts/chunk', async (req, res) => {
   }
 });
 
+// Backend Idempotency Cache to prevent duplicate simultaneous stream executions for the same requestId
+interface ActiveRequestRecord {
+  status: 'processing' | 'completed';
+  timestamp: number;
+}
+const activeRequestCache = new Map<string, ActiveRequestRecord>();
+
+// Clean up entries older than 2 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, record] of activeRequestCache.entries()) {
+    if (now - record.timestamp > 120000) {
+      activeRequestCache.delete(id);
+    }
+  }
+}, 30000);
+
 // Low-latency Streaming SSE Assistant Endpoint
 app.post('/api/assistant/stream', async (req, res) => {
-  const { prompt, history = [], style = 'concise' } = req.body;
+  const { requestId, prompt, history = [], style = 'concise' } = req.body;
 
   if (!prompt || typeof prompt !== 'string') {
     return res.status(400).json({ error: 'Prompt is required' });
   }
+
+  // Idempotency check: if this requestId is already currently in flight, drop duplicate stream
+  if (requestId && typeof requestId === 'string') {
+    const existing = activeRequestCache.get(requestId);
+    if (existing && existing.status === 'processing') {
+      console.log(`[BACKEND IDEMPOTENCY] Duplicate in-flight request ignored: ${requestId}`);
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+      });
+      return res.end();
+    }
+    activeRequestCache.set(requestId, { status: 'processing', timestamp: Date.now() });
+  }
+
+  req.on('close', () => {
+    if (requestId && typeof requestId === 'string') {
+      activeRequestCache.set(requestId, { status: 'completed', timestamp: Date.now() });
+    }
+  });
 
   // Set Server-Sent Events headers
   res.writeHead(200, {

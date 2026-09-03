@@ -290,8 +290,8 @@ export const JarvisCenterColumn: React.FC<JarvisCenterColumnProps> = ({
               </div>
             ))}
 
-            {/* Currently streaming message */}
-            {currentMessage && currentMessage.role === 'assistant' && (
+            {/* Currently streaming message - rendered strictly when not already committed to messages */}
+            {currentMessage && currentMessage.role === 'assistant' && !messages.some((m) => m.id === currentMessage.id) && (
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-emerald-400 tracking-wider">

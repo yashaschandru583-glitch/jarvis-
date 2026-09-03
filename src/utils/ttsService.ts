@@ -143,6 +143,8 @@ export class JarvisTTSService {
   private options: TTSOptions = {};
   private sessionStartTime = 0;
   private hasEmittedFirstSound = false;
+  private activeRequestId = '';
+  private processedSentenceIds: Set<string> = new Set();
 
   // Telemetry metrics
   private activeMetrics: VoiceMetrics = {
@@ -224,12 +226,14 @@ export class JarvisTTSService {
   /**
    * Begins a new streaming voice session
    */
-  public startStreaming(options: TTSOptions = {}, promptStartTime?: number) {
+  public startStreaming(options: TTSOptions = {}, promptStartTime?: number, requestId?: string) {
     this.cancelTTS();
     this.unlockAudioContext();
     this.isInterrupted = false;
     this.hasEmittedFirstSound = false;
     this.sessionStartTime = promptStartTime || performance.now();
+    this.activeRequestId = requestId || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tts-${Date.now()}`);
+    this.processedSentenceIds.clear();
 
     this.options = {
       pitch: options.pitch ?? 0.90, // Deep, calm, mature tone
@@ -310,8 +314,15 @@ export class JarvisTTSService {
   public enqueueTTS(text: string) {
     if (this.isInterrupted) return;
 
+    const sentenceId = `${this.activeRequestId || 'tts'}-${this.sentenceIndex}`;
+    if (this.processedSentenceIds.has(sentenceId)) {
+      console.log(`[TTS DEDUPLICATION] Sentence already processed, ignoring: ${sentenceId}`);
+      return;
+    }
+    this.processedSentenceIds.add(sentenceId);
+
     const item: AudioQueueItem = {
-      id: `chunk-${Date.now()}-${this.sentenceIndex}`,
+      id: sentenceId,
       text,
       index: this.sentenceIndex++,
       status: 'queued',
@@ -632,14 +643,14 @@ export class JarvisTTSService {
   /**
    * Fast-path static text speaker
    */
-  public speak(text: string, options: TTSOptions = {}) {
+  public speak(text: string, options: TTSOptions = {}, requestId?: string) {
     const cleaned = cleanSpokenText(text);
     if (!cleaned) {
       options.onEnd?.();
       return;
     }
 
-    this.startStreaming(options);
+    this.startStreaming(options, performance.now(), requestId);
     this.pushToken(cleaned);
     this.finishStream();
   }
