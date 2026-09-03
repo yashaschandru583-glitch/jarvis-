@@ -36,13 +36,15 @@ import { desktopAgent } from './utils/desktopAgentService';
 import {
   startSpeechRecognition,
   stopSpeechRecognition,
+  speakJarvis,
+  stopJarvisSpeech,
 } from './utils/speech';
 
 /* =========================================================
-   JARVIS CLIENT-SIDE CONFIGURATION
+   GEMINI CONFIGURATION
    ========================================================= */
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 const GEMINI_ENDPOINT =
   `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`;
@@ -72,25 +74,26 @@ const DEFAULT_SETTINGS: AssistantSettings = {
 };
 
 /* =========================================================
-   TYPES
+   LOCAL STORAGE HELPERS
    ========================================================= */
 
-interface GeminiSource {
-  title?: string;
-  url?: string;
-  domain?: string;
-  snippet?: string;
-}
+const GEMINI_KEY_STORAGE =
+  'jarvis_gemini_api_key';
 
-/* =========================================================
-   GEMINI API KEY
-   ========================================================= */
+const TASK_STORAGE =
+  'jarvis_local_tasks';
 
-function getStoredGeminiKey(): string {
+const MESSAGE_STORAGE =
+  'jarvis_messages';
+
+const SETTINGS_STORAGE =
+  'jarvis_settings';
+
+function getGeminiKey(): string {
   try {
     return (
       localStorage.getItem(
-        'jarvis_gemini_api_key'
+        GEMINI_KEY_STORAGE
       ) || ''
     ).trim();
   } catch {
@@ -98,9 +101,26 @@ function getStoredGeminiKey(): string {
   }
 }
 
-function requestGeminiKey(): string {
+function saveGeminiKey(
+  key: string
+) {
+  try {
+    localStorage.setItem(
+      GEMINI_KEY_STORAGE,
+      key.trim()
+    );
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+/* =========================================================
+   GEMINI KEY REQUEST
+   ========================================================= */
+
+function askForGeminiKey(): string {
   const existing =
-    getStoredGeminiKey();
+    getGeminiKey();
 
   if (existing) {
     return existing;
@@ -108,44 +128,43 @@ function requestGeminiKey(): string {
 
   const key =
     window.prompt(
-      'J.A.R.V.I.S. requires a Gemini API key for direct browser AI access.\n\nEnter your Gemini API key:'
+      'J.A.R.V.I.S. AI CONNECTION\n\nEnter your Gemini API key from Google AI Studio:'
     );
 
   if (!key) {
     return '';
   }
 
-  const cleanKey =
+  const clean =
     key.trim();
 
-  if (!cleanKey) {
+  if (!clean) {
     return '';
   }
 
-  try {
-    localStorage.setItem(
-      'jarvis_gemini_api_key',
-      cleanKey
-    );
-  } catch {
-    // Ignore storage errors
-  }
+  saveGeminiKey(clean);
 
-  return cleanKey;
+  return clean;
 }
 
 /* =========================================================
-   GEMINI REQUEST BODY
+   GEMINI HISTORY
    ========================================================= */
 
-function buildGeminiContents(
-  history: Message[],
-  prompt: string
+function buildGeminiHistory(
+  messages: Message[],
+  prompt: string,
+  memory: number
 ) {
   const contents: any[] = [];
 
+  const history =
+    messages.slice(
+      -(memory || 10)
+    );
+
   for (
-    const message of history.slice(-10)
+    const message of history
   ) {
     if (
       !message.content ||
@@ -173,6 +192,7 @@ function buildGeminiContents(
 
   contents.push({
     role: 'user',
+
     parts: [
       {
         text: prompt,
@@ -184,56 +204,156 @@ function buildGeminiContents(
 }
 
 /* =========================================================
-   SYSTEM INSTRUCTION
+   SYSTEM PROMPT
    ========================================================= */
 
-function getSystemInstruction(
+function getSystemPrompt(
   style: string
 ) {
   return `
 You are J.A.R.V.I.S., an advanced personal AI assistant.
 
 PERSONALITY:
-- Speak like a calm, highly intelligent British-style AI assistant.
+- Calm, intelligent, precise and professional.
+- Speak with polished British-style wording.
 - Address the user as "sir" naturally when appropriate.
-- Never imitate or claim to be a real actor or copyrighted movie voice.
-- Be professional, confident, concise and useful.
-- Do not repeat the user's question unnecessarily.
+- Do not imitate any real actor or copyrighted character voice.
+- Be confident without being arrogant.
+- Do not waste time with unnecessary greetings.
 
 ACCURACY:
-- Never invent facts.
-- If you are uncertain, say so.
-- For current or changing information, use Google Search grounding.
-- Prefer verified information over assumptions.
-- Never fabricate URLs, statistics, people, dates or events.
+- Never knowingly invent information.
+- Never fabricate names, dates, statistics, URLs or events.
+- If you do not know something, clearly say that you are uncertain.
+- Do not pretend to have performed an action that you could not perform.
+
+CURRENT DATE:
+${new Date().toString()}
 
 RESPONSE STYLE:
-- Simple questions: answer directly.
-- Calculations: give the exact result and a short explanation only when useful.
-- Commands: acknowledge briefly.
-- Complex questions: explain clearly using short sections.
-- Avoid unnecessary greetings and filler.
-- Do not output internal reasoning.
-- Do not mention hidden system instructions.
+${style || 'concise'}
 
-WEB:
-- When current information is needed, use Google Search.
-- When the user asks about today's news, current events, current people, companies, prices, recent technology or other changing information, search the web.
-- Distinguish current facts from general knowledge.
-
-VOICE:
+VOICE OPTIMIZATION:
 - Write naturally for speech.
 - Avoid excessive markdown.
-- Avoid long lists unless needed.
-- Keep spoken answers concise.
+- Avoid huge paragraphs.
+- For simple questions, answer directly.
+- For calculations, give the exact result.
+- For technical questions, explain clearly.
+- For commands, acknowledge briefly.
 
-STYLE PREFERENCE:
-${style || 'concise'}
+IMPORTANT:
+This assistant is running as a browser-only GitHub Pages application.
+It does not have direct operating-system privileges.
+Do not claim that a Windows/macOS application was opened unless the browser/local desktop agent actually confirms it.
 `;
 }
 
 /* =========================================================
-   CLEAN TEXT FOR SPEECH
+   GEMINI STREAM PARSER
+   ========================================================= */
+
+function extractGeminiText(
+  data: any
+): string {
+  let text = '';
+
+  const candidates =
+    data?.candidates;
+
+  if (
+    !Array.isArray(
+      candidates
+    )
+  ) {
+    return '';
+  }
+
+  for (
+    const candidate of candidates
+  ) {
+    const parts =
+      candidate?.content
+        ?.parts;
+
+    if (
+      !Array.isArray(parts)
+    ) {
+      continue;
+    }
+
+    for (
+      const part of parts
+    ) {
+      if (
+        typeof part?.text ===
+        'string'
+      ) {
+        text +=
+          part.text;
+      }
+    }
+  }
+
+  return text;
+}
+
+/* =========================================================
+   SOURCE PARSER
+   ========================================================= */
+
+function extractSources(
+  data: any
+) {
+  const results: any[] =
+    [];
+
+  const chunks =
+    data?.groundingMetadata
+      ?.groundingChunks;
+
+  if (
+    !Array.isArray(chunks)
+  ) {
+    return results;
+  }
+
+  for (
+    const chunk of chunks
+  ) {
+    const web =
+      chunk?.web;
+
+    if (
+      web?.uri
+    ) {
+      results.push({
+        title:
+          web.title ||
+          web.uri,
+
+        url:
+          web.uri,
+
+        domain:
+          (() => {
+            try {
+              return new URL(
+                web.uri
+              ).hostname;
+            } catch {
+              return '';
+            }
+          })(),
+      });
+    }
+  }
+
+  return results;
+}
+
+/* =========================================================
+   SPEECH CLEANER
    ========================================================= */
 
 function cleanSpeechText(
@@ -288,137 +408,23 @@ function cleanSpeechText(
 }
 
 /* =========================================================
-   BROWSER VOICE
+   BROWSER TTS
    ========================================================= */
 
-function getBritishVoice(
-  preferredVoice?: string
-): SpeechSynthesisVoice | undefined {
-  if (
-    typeof window ===
-      'undefined' ||
-    !('speechSynthesis' in window)
-  ) {
-    return undefined;
-  }
-
-  const voices =
-    window.speechSynthesis.getVoices();
-
-  if (!voices.length) {
-    return undefined;
-  }
-
-  if (preferredVoice) {
-    const preferred =
-      voices.find(
-        (voice) =>
-          voice.name
-            .toLowerCase()
-            .includes(
-              preferredVoice.toLowerCase()
-            )
-      );
-
-    if (preferred) {
-      return preferred;
-    }
-  }
-
-  const britishMale =
-    voices.find(
-      (voice) => {
-        const name =
-          voice.name.toLowerCase();
-
-        const lang =
-          voice.lang.toLowerCase();
-
-        return (
-          (
-            lang ===
-              'en-gb' ||
-            lang.startsWith(
-              'en-gb'
-            )
-          ) &&
-          !(
-            name.includes('female') ||
-            name.includes('zira') ||
-            name.includes('hazel')
-          )
-        );
-      }
-    );
-
-  if (britishMale) {
-    return britishMale;
-  }
-
-  const british =
-    voices.find(
-      (voice) =>
-        voice.lang
-          .toLowerCase()
-          .startsWith(
-            'en-gb'
-          )
-    );
-
-  if (british) {
-    return british;
-  }
-
-  const englishMale =
-    voices.find(
-      (voice) => {
-        const name =
-          voice.name.toLowerCase();
-
-        return (
-          voice.lang
-            .toLowerCase()
-            .startsWith('en') &&
-          !name.includes(
-            'female'
-          ) &&
-          !name.includes(
-            'zira'
-          )
-        );
-      }
-    );
-
-  return (
-    englishMale ||
-    voices.find(
-      (voice) =>
-        voice.lang
-          .toLowerCase()
-          .startsWith('en')
-    )
-  );
-}
-
-/* =========================================================
-   SPEECH ENGINE
-   ========================================================= */
-
-function speakBrowser(
+function browserSpeak(
   text: string,
   settings: AssistantSettings,
-  requestId: string,
-  isActive: () => boolean,
-  onStart?: () => void,
-  onEnd?: () => void,
-  onLevel?: (level: number) => void
+  onStart: () => void,
+  onEnd: () => void,
+  onLevel: (
+    value: number
+  ) => void
 ) {
   if (
-    typeof window ===
-      'undefined' ||
-    !('speechSynthesis' in window)
+    !('speechSynthesis' in
+      window)
   ) {
-    onEnd?.();
+    onEnd();
     return;
   }
 
@@ -426,25 +432,43 @@ function speakBrowser(
     cleanSpeechText(text);
 
   if (!clean) {
-    onEnd?.();
+    onEnd();
     return;
   }
 
   window.speechSynthesis.cancel();
+
+  const voices =
+    window.speechSynthesis
+      .getVoices();
+
+  const british =
+    voices.find(
+      (voice) =>
+        voice.lang
+          .toLowerCase()
+          .startsWith('en-gb')
+    );
+
+  const english =
+    voices.find(
+      (voice) =>
+        voice.lang
+          .toLowerCase()
+          .startsWith('en')
+    );
 
   const utterance =
     new SpeechSynthesisUtterance(
       clean
     );
 
-  const voice =
-    getBritishVoice(
-      settings.preferredVoice
-    );
-
-  if (voice) {
+  if (british) {
     utterance.voice =
-      voice;
+      british;
+  } else if (english) {
+    utterance.voice =
+      english;
   }
 
   utterance.lang =
@@ -481,218 +505,63 @@ function speakBrowser(
     );
 
   let levelTimer:
-    number | undefined;
+    number | null =
+    null;
 
-  utterance.onstart = () => {
-    if (!isActive()) {
-      window.speechSynthesis.cancel();
-      return;
-    }
+  utterance.onstart =
+    () => {
+      onStart();
 
-    onStart?.();
+      levelTimer =
+        window.setInterval(
+          () => {
+            onLevel(
+              0.25 +
+                Math.random() *
+                  0.5
+            );
+          },
+          80
+        );
+    };
 
-    levelTimer =
-      window.setInterval(
-        () => {
-          if (
-            !isActive()
-          ) {
-            window.speechSynthesis.cancel();
+  utterance.onend =
+    () => {
+      if (
+        levelTimer !==
+        null
+      ) {
+        clearInterval(
+          levelTimer
+        );
+      }
 
-            if (
-              levelTimer
-            ) {
-              clearInterval(
-                levelTimer
-              );
-            }
+      onLevel(0);
+      onEnd();
+    };
 
-            return;
-          }
+  utterance.onerror =
+    () => {
+      if (
+        levelTimer !==
+        null
+      ) {
+        clearInterval(
+          levelTimer
+        );
+      }
 
-          const level =
-            0.25 +
-            Math.random() *
-              0.55;
-
-          onLevel?.(
-            Math.min(
-              1,
-              level
-            )
-          );
-        },
-        80
-      );
-  };
-
-  utterance.onend = () => {
-    if (
-      levelTimer
-    ) {
-      clearInterval(
-        levelTimer
-      );
-    }
-
-    onLevel?.(0);
-
-    if (isActive()) {
-      onEnd?.();
-    }
-  };
-
-  utterance.onerror = () => {
-    if (
-      levelTimer
-    ) {
-      clearInterval(
-        levelTimer
-      );
-    }
-
-    onLevel?.(0);
-
-    if (isActive()) {
-      onEnd?.();
-    }
-  };
+      onLevel(0);
+      onEnd();
+    };
 
   window.speechSynthesis.speak(
     utterance
   );
-
-  /*
-   * Chrome sometimes pauses long SpeechSynthesis
-   * utterances. Keep the queue alive.
-   */
-  window.setTimeout(() => {
-    if (
-      isActive() &&
-      window.speechSynthesis.paused
-    ) {
-      window.speechSynthesis.resume();
-    }
-  }, 250);
 }
 
 /* =========================================================
-   STOP BROWSER SPEECH
-   ========================================================= */
-
-function stopBrowserSpeech() {
-  if (
-    typeof window !==
-      'undefined' &&
-    'speechSynthesis' in window
-  ) {
-    try {
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.resume();
-    } catch {
-      // Ignore
-    }
-  }
-}
-
-/* =========================================================
-   PARSE GEMINI STREAM
-   ========================================================= */
-
-function extractTextFromGeminiChunk(
-  data: any
-): string {
-  let result = '';
-
-  const candidates =
-    data?.candidates;
-
-  if (
-    Array.isArray(
-      candidates
-    )
-  ) {
-    for (
-      const candidate of candidates
-    ) {
-      const parts =
-        candidate?.content?.parts;
-
-      if (
-        Array.isArray(parts)
-      ) {
-        for (
-          const part of parts
-        ) {
-          if (
-            typeof part?.text ===
-            'string'
-          ) {
-            result +=
-              part.text;
-          }
-        }
-      }
-    }
-  }
-
-  return result;
-}
-
-/* =========================================================
-   EXTRACT SOURCES
-   ========================================================= */
-
-function extractGeminiSources(
-  data: any
-): GeminiSource[] {
-  const sources: GeminiSource[] =
-    [];
-
-  const chunks =
-    data?.groundingMetadata
-      ?.groundingChunks;
-
-  if (
-    Array.isArray(chunks)
-  ) {
-    for (
-      const chunk of chunks
-    ) {
-      const web =
-        chunk?.web;
-
-      if (
-        web?.uri
-      ) {
-        sources.push({
-          title:
-            web.title ||
-            web.uri,
-
-          url:
-            web.uri,
-
-          domain:
-            (() => {
-              try {
-                return new URL(
-                  web.uri
-                ).hostname;
-              } catch {
-                return '';
-              }
-            })(),
-        });
-      }
-    }
-  }
-
-  return sources;
-}
-
-/* =========================================================
-   JARVIS APP
+   APP
    ========================================================= */
 
 export default function App() {
@@ -705,7 +574,20 @@ export default function App() {
     useState(0);
 
   const [messages, setMessages] =
-    useState<Message[]>([]);
+    useState<Message[]>(() => {
+      try {
+        const saved =
+          localStorage.getItem(
+            MESSAGE_STORAGE
+          );
+
+        return saved
+          ? JSON.parse(saved)
+          : [];
+      } catch {
+        return [];
+      }
+    });
 
   const [currentMessage, setCurrentMessage] =
     useState<Message | null>(
@@ -726,7 +608,20 @@ export default function App() {
     >(undefined);
 
   const [tasks, setTasks] =
-    useState<StarkTask[]>([]);
+    useState<StarkTask[]>(() => {
+      try {
+        const saved =
+          localStorage.getItem(
+            TASK_STORAGE
+          );
+
+        return saved
+          ? JSON.parse(saved)
+          : [];
+      } catch {
+        return [];
+      }
+    });
 
   /* =======================================================
      BOOT
@@ -734,16 +629,13 @@ export default function App() {
 
   const [isBooting, setIsBooting] =
     useState(() => {
-      if (
-        typeof window !==
-        'undefined'
-      ) {
+      try {
         return !sessionStorage.getItem(
           'jarvis_booted'
         );
+      } catch {
+        return true;
       }
-
-      return true;
     });
 
   /* =======================================================
@@ -756,7 +648,7 @@ export default function App() {
         try {
           const saved =
             localStorage.getItem(
-              'jarvis_settings'
+              SETTINGS_STORAGE
             );
 
           if (saved) {
@@ -779,17 +671,29 @@ export default function App() {
 
   const [telemetry, setTelemetry] =
     useState<SystemTelemetry>({
-      coreOutputGW: 3.42,
-      coreTempKelvin: 418.5,
-      efficiencyPercent: 99.4,
-      frequencyHz: 60.02,
+      coreOutputGW:
+        3.42,
+
+      coreTempKelvin:
+        418.5,
+
+      efficiencyPercent:
+        99.4,
+
+      frequencyHz:
+        60.02,
+
       batteryStatus:
         'FUSION COUPLING (99.8%)',
+
       networkStatus:
-        'GEMINI DIRECT LINK',
+        'DIRECT GEMINI CONNECTION',
+
       activeModel:
         GEMINI_MODEL,
-      demoMode: false,
+
+      demoMode:
+        false,
     });
 
   /* =======================================================
@@ -813,10 +717,6 @@ export default function App() {
 
   const [isRunningAppsOpen, setIsRunningAppsOpen] =
     useState(false);
-
-  /* =======================================================
-     AUTOPLAY
-     ======================================================= */
 
   const [isAutoplayBlocked, setIsAutoplayBlocked] =
     useState(false);
@@ -859,185 +759,37 @@ export default function App() {
     useRef(0);
 
   /* =======================================================
-     AUDIO UNLOCK
-     ======================================================= */
-
-  useEffect(() => {
-    const unlock =
-      () => {
-        setIsAutoplayBlocked(
-          false
-        );
-
-        if (
-          'speechSynthesis' in
-          window
-        ) {
-          try {
-            window.speechSynthesis.resume();
-          } catch {
-            // Ignore
-          }
-        }
-      };
-
-    window.addEventListener(
-      'click',
-      unlock
-    );
-
-    window.addEventListener(
-      'touchstart',
-      unlock
-    );
-
-    window.addEventListener(
-      'keydown',
-      unlock
-    );
-
-    return () => {
-      window.removeEventListener(
-        'click',
-        unlock
-      );
-
-      window.removeEventListener(
-        'touchstart',
-        unlock
-      );
-
-      window.removeEventListener(
-        'keydown',
-        unlock
-      );
-    };
-  }, []);
-
-  /* =======================================================
-     DESKTOP AGENT
-     ======================================================= */
-
-  useEffect(() => {
-    const unsubState =
-      desktopAgent.subscribeState(
-        (newState) => {
-          setDesktopAgentState(
-            newState
-          );
-        }
-      );
-
-    const unsubAction =
-      desktopAgent.subscribeAction(
-        (action) => {
-          setDesktopAction(
-            action
-          );
-
-          if (
-            action.stage ===
-              'success' ||
-            action.stage ===
-              'failed'
-          ) {
-            setTimeout(() => {
-              setDesktopAction(
-                (current) =>
-                  current?.id ===
-                  action.id
-                    ? null
-                    : current
-              );
-            }, 4500);
-          }
-        }
-      );
-
-    desktopAgent.checkHealth();
-
-    return () => {
-      unsubState();
-      unsubAction();
-    };
-  }, []);
-
-  /* =======================================================
-     DESKTOP TOOL ACTIONS
-     ======================================================= */
-
-  const dispatchDesktopAction =
-    useCallback(
-      (
-        tool: {
-          name: string;
-          args?: any;
-          result?: any;
-        }
-      ) => {
-        if (
-          tool.name ===
-          'open_desktop_application'
-        ) {
-          const appName =
-            tool.args
-              ?.applicationName ||
-            tool.result?.app;
-
-          if (appName) {
-            desktopAgent.openApp(
-              appName
-            );
-          }
-
-          return;
-        }
-
-        if (
-          tool.name ===
-          'close_desktop_application'
-        ) {
-          const appName =
-            tool.args
-              ?.applicationName ||
-            tool.result?.app;
-
-          if (appName) {
-            desktopAgent.closeApp(
-              appName,
-              true
-            );
-          }
-
-          return;
-        }
-
-        if (
-          tool.name ===
-          'open_website'
-        ) {
-          const url =
-            tool.args?.url ||
-            tool.result?.url;
-
-          if (url) {
-            desktopAgent.openWebsite(
-              url
-            );
-          }
-        }
-      },
-      []
-    );
-
-  /* =======================================================
-     SETTINGS
+     SAVE LOCAL DATA
      ======================================================= */
 
   useEffect(() => {
     try {
       localStorage.setItem(
-        'jarvis_settings',
+        MESSAGE_STORAGE,
+        JSON.stringify(
+          messages
+        )
+      );
+    } catch {
+      // Ignore
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        TASK_STORAGE,
+        JSON.stringify(tasks)
+      );
+    } catch {
+      // Ignore
+    }
+  }, [tasks]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SETTINGS_STORAGE,
         JSON.stringify(
           settings
         )
@@ -1056,36 +808,61 @@ export default function App() {
   ]);
 
   /* =======================================================
-     LOCAL TASKS
+     DESKTOP AGENT
      ======================================================= */
 
   useEffect(() => {
-    try {
-      const saved =
-        localStorage.getItem(
-          'jarvis_tasks'
-        );
-
-      if (saved) {
-        setTasks(
-          JSON.parse(saved)
-        );
-      }
-    } catch {
-      // Ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        'jarvis_tasks',
-        JSON.stringify(tasks)
+    const unsubscribeState =
+      desktopAgent.subscribeState(
+        (newState) => {
+          setDesktopAgentState(
+            newState
+          );
+        }
       );
-    } catch {
-      // Ignore
-    }
-  }, [tasks]);
+
+    const unsubscribeAction =
+      desktopAgent.subscribeAction(
+        (action) => {
+          setDesktopAction(
+            action
+          );
+
+          if (
+            action.stage ===
+              'success' ||
+            action.stage ===
+              'failed'
+          ) {
+            window.setTimeout(
+              () => {
+                setDesktopAction(
+                  (current) =>
+                    current?.id ===
+                    action.id
+                      ? null
+                      : current
+                );
+              },
+              4500
+            );
+          }
+        }
+      );
+
+    /*
+     * This only checks for the optional
+     * local desktop agent.
+     *
+     * Gemini itself does NOT require it.
+     */
+    desktopAgent.checkHealth();
+
+    return () => {
+      unsubscribeState();
+      unsubscribeAction();
+    };
+  }, []);
 
   /* =======================================================
      BOOT
@@ -1115,7 +892,7 @@ export default function App() {
     };
 
   /* =======================================================
-     STOP
+     STOP EVERYTHING
      ======================================================= */
 
   const handleStop =
@@ -1133,7 +910,18 @@ export default function App() {
 
       stopSpeechRecognition();
 
-      stopBrowserSpeech();
+      stopJarvisSpeech();
+
+      if (
+        'speechSynthesis' in
+        window
+      ) {
+        try {
+          window.speechSynthesis.cancel();
+        } catch {
+          // Ignore
+        }
+      }
 
       setState('idle');
 
@@ -1143,6 +931,10 @@ export default function App() {
 
       setCurrentMessage(
         null
+      );
+
+      setActiveTool(
+        undefined
       );
 
       soundFx.playClick(
@@ -1156,58 +948,70 @@ export default function App() {
      SPEAK RESPONSE
      ======================================================= */
 
-  const speakResponse = useCallback(
-    (
-      text: string,
-      requestId: string
-    ) => {
-      if (
-        !settings.voiceEnabled
-      ) {
-        setState('idle');
-        return;
-      }
-
-      setState(
-        'speaking'
-      );
-
-      speakBrowser(
-        text,
-        settings,
-        requestId,
-        () =>
-          activeRequestIdRef.current ===
-          requestId,
-        () => {
-          if (
-            activeRequestIdRef.current ===
-            requestId
-          ) {
-            setState(
-              'idle'
-            );
-
-            setAudioLevel(0);
-          }
-        },
-        (level) => {
-          if (
-            activeRequestIdRef.current ===
-            requestId
-          ) {
-            setAudioLevel(
-              level
-            );
-          }
+  const speakResponse =
+    useCallback(
+      (
+        text: string,
+        requestId: string
+      ) => {
+        if (
+          !settings.voiceEnabled
+        ) {
+          setState('idle');
+          return;
         }
-      );
-    },
-    [settings]
-  );
+
+        setState(
+          'speaking'
+        );
+
+        browserSpeak(
+          text,
+          settings,
+
+          () => {
+            if (
+              activeRequestIdRef.current ===
+              requestId
+            ) {
+              setState(
+                'speaking'
+              );
+            }
+          },
+
+          () => {
+            if (
+              activeRequestIdRef.current ===
+              requestId
+            ) {
+              setState(
+                'idle'
+              );
+
+              setAudioLevel(
+                0
+              );
+            }
+          },
+
+          (level) => {
+            if (
+              activeRequestIdRef.current ===
+              requestId
+            ) {
+              setAudioLevel(
+                level
+              );
+            }
+          }
+        );
+      },
+      [settings]
+    );
 
   /* =======================================================
-     MAIN GEMINI STREAM
+     MAIN GEMINI FUNCTION
      ======================================================= */
 
   const processDirective =
@@ -1220,6 +1024,10 @@ export default function App() {
       if (!cleanPrompt) {
         return;
       }
+
+      /* ---------------------------------------------------
+         DUPLICATE PROTECTION
+         --------------------------------------------------- */
 
       const normalized =
         cleanPrompt
@@ -1236,10 +1044,6 @@ export default function App() {
       const now =
         Date.now();
 
-      /* ---------------------------------------------------
-         DUPLICATE PROTECTION
-         --------------------------------------------------- */
-
       if (
         normalized ===
           lastPromptRef.current &&
@@ -1247,10 +1051,6 @@ export default function App() {
           lastPromptTimeRef.current <
           3000
       ) {
-        console.log(
-          '[JARVIS] Duplicate request ignored.'
-        );
-
         return;
       }
 
@@ -1261,59 +1061,48 @@ export default function App() {
         now;
 
       /* ---------------------------------------------------
-         STOP OLD REQUEST
+         GET KEY
          --------------------------------------------------- */
 
-      if (
-        isProcessingRef.current
-      ) {
-        activeAbortControllerRef.current?.abort();
+      const apiKey =
+        getGeminiKey() ||
+        askForGeminiKey();
 
-        stopBrowserSpeech();
-
-        stopSpeechRecognition();
+      if (!apiKey) {
+        return;
       }
 
-      isProcessingRef.current =
-        true;
+      /* ---------------------------------------------------
+         STOP PREVIOUS REQUEST
+         --------------------------------------------------- */
+
+      activeAbortControllerRef.current?.abort();
+
+      stopJarvisSpeech();
+
+      if (
+        'speechSynthesis' in
+        window
+      ) {
+        window.speechSynthesis.cancel();
+      }
 
       const requestId =
-        typeof crypto !==
-          'undefined' &&
         crypto.randomUUID
           ? crypto.randomUUID()
-          : `jarvis-${Date.now()}-${Math.random()
-              .toString(36)
-              .slice(2)}`;
-
-      activeRequestIdRef.current =
-        requestId;
+          : `jarvis-${Date.now()}`;
 
       const controller =
         new AbortController();
 
+      activeRequestIdRef.current =
+        requestId;
+
       activeAbortControllerRef.current =
         controller;
 
-      /* ---------------------------------------------------
-         GEMINI KEY
-         --------------------------------------------------- */
-
-      const apiKey =
-        getStoredGeminiKey() ||
-        requestGeminiKey();
-
-      if (!apiKey) {
-        isProcessingRef.current =
-          false;
-
-        activeRequestIdRef.current =
-          null;
-
-        setState('idle');
-
-        return;
-      }
+      isProcessingRef.current =
+        true;
 
       /* ---------------------------------------------------
          USER MESSAGE
@@ -1341,15 +1130,19 @@ export default function App() {
         ]
       );
 
+      setLiveTranscript('');
+
       setCurrentMessage(
         null
       );
 
-      setLiveTranscript('');
-
       setActiveTool(
         undefined
       );
+
+      /* ---------------------------------------------------
+         EXECUTION HUD
+         --------------------------------------------------- */
 
       setExecutionSteps([
         {
@@ -1368,7 +1161,7 @@ export default function App() {
             'understanding',
 
           label:
-            'Processing semantic directive',
+            'Understanding directive',
 
           timestamp:
             Date.now(),
@@ -1392,24 +1185,33 @@ export default function App() {
         settings.soundEffects
       );
 
+      /* ---------------------------------------------------
+         ASSISTANT RESPONSE
+         --------------------------------------------------- */
+
       const assistantMessageId =
         `assistant-${requestId}`;
 
-      let fullResponse =
+      let accumulatedText =
         '';
 
-      let sources:
-        GeminiSource[] =
+      let sourcesData:
+        any[] =
         [];
 
-      const responseStart =
+      const startTime =
         performance.now();
 
-      /* ===================================================
-         REQUEST
-         =================================================== */
-
       try {
+        console.log(
+          '[JARVIS] Direct Gemini request:',
+          requestId
+        );
+
+        /* -------------------------------------------------
+           GEMINI REQUEST
+           ------------------------------------------------- */
+
         const response =
           await fetch(
             GEMINI_ENDPOINT,
@@ -1425,38 +1227,33 @@ export default function App() {
                   apiKey,
               },
 
-              body: JSON.stringify({
-                contents:
-                  buildGeminiContents(
-                    messages,
-                    cleanPrompt
-                  ),
+              body:
+                JSON.stringify({
+                  contents:
+                    buildGeminiHistory(
+                      messages,
+                      cleanPrompt,
+                      settings.contextMemory
+                    ),
 
-                systemInstruction: {
-                  parts: [
+                  systemInstruction:
                     {
-                      text:
-                        getSystemInstruction(
-                          settings.aiStyle
-                        ),
+                      parts: [
+                        {
+                          text:
+                            getSystemPrompt(
+                              settings.aiStyle
+                            ),
+                        },
+                      ],
                     },
-                  ],
-                },
 
-                tools: [
-                  {
-                    google_search: {},
-                  },
-                ],
-
-                generationConfig: {
-                  temperature:
-                    0.3,
-
-                  maxOutputTokens:
-                    2048,
-                },
-              }),
+                  generationConfig:
+                    {
+                      maxOutputTokens:
+                        2048,
+                    },
+                }),
 
               signal:
                 controller.signal,
@@ -1464,24 +1261,27 @@ export default function App() {
           );
 
         /* -------------------------------------------------
-           API ERROR
+           ERROR RESPONSE
            ------------------------------------------------- */
 
-        if (!response.ok) {
-          let errorMessage =
-            `Gemini API returned HTTP ${response.status}.`;
+        if (
+          !response.ok
+        ) {
+          let errorText =
+            `Gemini API error: HTTP ${response.status}`;
 
           try {
             const errorData =
               await response.json();
 
-            const apiError =
+            if (
               errorData?.error
-                ?.message;
-
-            if (apiError) {
-              errorMessage =
-                apiError;
+                ?.message
+            ) {
+              errorText =
+                errorData
+                  .error
+                  .message;
             }
           } catch {
             // Ignore
@@ -1489,32 +1289,42 @@ export default function App() {
 
           if (
             response.status ===
-            400
+              400 ||
+            response.status ===
+              404
           ) {
-            errorMessage =
-              `Gemini rejected the request. ${errorMessage}`;
+            errorText =
+              `Gemini model/request error. ${errorText}`;
           }
 
           if (
             response.status ===
-            401 ||
+              401 ||
             response.status ===
-            403
+              403
           ) {
             try {
               localStorage.removeItem(
-                'jarvis_gemini_api_key'
+                GEMINI_KEY_STORAGE
               );
             } catch {
               // Ignore
             }
 
-            errorMessage =
-              'Gemini API key was rejected. Please enter a valid Gemini API key on the next request.';
+            errorText =
+              'Your Gemini API key was rejected. Please enter a valid key from Google AI Studio.';
+          }
+
+          if (
+            response.status ===
+            429
+          ) {
+            errorText =
+              'Gemini rate limit reached. Please wait a moment and try again.';
           }
 
           throw new Error(
-            errorMessage
+            errorText
           );
         }
 
@@ -1526,25 +1336,12 @@ export default function App() {
           );
         }
 
-        setExecutionSteps(
-          (previous) => [
-            ...previous,
-            {
-              stage:
-                'thinking',
-
-              label:
-                'Gemini connection established',
-
-              timestamp:
-                Date.now(),
-            },
-          ]
-        );
-
         /* -------------------------------------------------
-           SSE READER
+           FIRST TOKEN
            ------------------------------------------------- */
+
+        let firstTokenReceived =
+          false;
 
         const reader =
           response.body.getReader();
@@ -1555,8 +1352,9 @@ export default function App() {
         let buffer =
           '';
 
-        let firstToken =
-          false;
+        /* -------------------------------------------------
+           READ STREAM
+           ------------------------------------------------- */
 
         while (true) {
           const {
@@ -1593,152 +1391,195 @@ export default function App() {
               }
             );
 
-          const lines =
+          const events =
             buffer.split(
-              '\n'
+              '\n\n'
             );
 
           buffer =
-            lines.pop() ||
+            events.pop() ||
             '';
 
           for (
-            const line of lines
+            const eventBlock of events
           ) {
-            const trimmed =
-              line.trim();
-
-            if (
-              !trimmed.startsWith(
-                'data:'
-              )
-            ) {
-              continue;
-            }
-
-            const jsonText =
-              trimmed
-                .slice(5)
-                .trim();
-
-            if (
-              !jsonText ||
-              jsonText ===
-                '[DONE]'
-            ) {
-              continue;
-            }
-
-            let chunk:
-              any;
-
-            try {
-              chunk =
-                JSON.parse(
-                  jsonText
-                );
-            } catch {
-              continue;
-            }
-
-            const chunkText =
-              extractTextFromGeminiChunk(
-                chunk
+            const lines =
+              eventBlock.split(
+                '\n'
               );
 
-            const chunkSources =
-              extractGeminiSources(
-                chunk
-              );
-
-            if (
-              chunkSources.length
+            for (
+              const line of lines
             ) {
-              sources = [
-                ...sources,
-                ...chunkSources,
-              ].filter(
-                (
-                  source,
-                  index,
-                  array
-                ) =>
-                  index ===
-                  array.findIndex(
-                    (
-                      item
-                    ) =>
-                      item.url ===
-                      source.url
-                  )
-              );
-            }
-
-            if (
-              chunkText
-            ) {
-              fullResponse +=
-                chunkText;
+              const trimmed =
+                line.trim();
 
               if (
-                !firstToken
+                !trimmed.startsWith(
+                  'data:'
+                )
               ) {
-                firstToken =
-                  true;
+                continue;
+              }
 
-                const latency =
-                  (
-                    performance.now() -
-                    responseStart
-                  ) / 1000;
+              const json =
+                trimmed
+                  .slice(5)
+                  .trim();
 
-                console.log(
-                  `[JARVIS] First token in ${latency.toFixed(
-                    2
-                  )}s`
+              if (
+                !json ||
+                json ===
+                  '[DONE]'
+              ) {
+                continue;
+              }
+
+              let data:
+                any;
+
+              try {
+                data =
+                  JSON.parse(
+                    json
+                  );
+              } catch {
+                continue;
+              }
+
+              /* -------------------------------------------
+                 TEXT
+                 ------------------------------------------- */
+
+              const chunkText =
+                extractGeminiText(
+                  data
                 );
 
-                setState(
-                  'speaking'
+              /* -------------------------------------------
+                 SOURCES
+                 ------------------------------------------- */
+
+              const newSources =
+                extractSources(
+                  data
+                );
+
+              if (
+                newSources.length
+              ) {
+                sourcesData = [
+                  ...sourcesData,
+                  ...newSources,
+                ].filter(
+                  (
+                    source,
+                    index,
+                    array
+                  ) =>
+                    index ===
+                    array.findIndex(
+                      (
+                        item
+                      ) =>
+                        item.url ===
+                        source.url
+                    )
                 );
               }
 
-              const liveMessage:
-                Message = {
-                id:
-                  assistantMessageId,
+              /* -------------------------------------------
+                 UPDATE RESPONSE
+                 ------------------------------------------- */
 
-                role:
-                  'assistant',
+              if (
+                chunkText
+              ) {
+                accumulatedText +=
+                  chunkText;
 
-                content:
-                  fullResponse,
+                if (
+                  !firstTokenReceived
+                ) {
+                  firstTokenReceived =
+                    true;
 
-                sources:
-                  sources,
+                  const latency =
+                    (
+                      performance.now() -
+                      startTime
+                    ) /
+                    1000;
 
-                timestamp:
-                  Date.now(),
-              };
+                  console.log(
+                    `[JARVIS] First token: ${latency.toFixed(
+                      2
+                    )}s`
+                  );
 
-              setCurrentMessage(
-                liveMessage
-              );
+                  setState(
+                    'speaking'
+                  );
+
+                  setExecutionSteps(
+                    (previous) => [
+                      ...previous,
+                      {
+                        stage:
+                          'thinking',
+
+                        label:
+                          'Gemini response stream active',
+
+                        timestamp:
+                          Date.now(),
+                      },
+                    ]
+                  );
+                }
+
+                const progressiveMessage:
+                  Message =
+                  {
+                    id:
+                      assistantMessageId,
+
+                    role:
+                      'assistant',
+
+                    content:
+                      accumulatedText,
+
+                    sources:
+                      sourcesData,
+
+                    timestamp:
+                      Date.now(),
+                  };
+
+                setCurrentMessage(
+                  progressiveMessage
+                );
+              }
             }
           }
         }
 
         /* -------------------------------------------------
-           FINAL RESPONSE
+           FINAL CHECK
            ------------------------------------------------- */
 
         if (
-          !fullResponse.trim()
+          !accumulatedText.trim()
         ) {
           throw new Error(
-            'Gemini returned no text.'
+            'Gemini returned no text. Please try again.'
           );
         }
+
+        /* -------------------------------------------------
+           FINAL MESSAGE
+           ------------------------------------------------- */
 
         const finalMessage:
           Message = {
@@ -1749,10 +1590,10 @@ export default function App() {
             'assistant',
 
           content:
-            fullResponse.trim(),
+            accumulatedText.trim(),
 
           sources:
-            sources,
+            sourcesData,
 
           timestamp:
             Date.now(),
@@ -1777,7 +1618,7 @@ export default function App() {
                 'completed',
 
               label:
-                'Response received',
+                'Protocol completed',
 
               timestamp:
                 Date.now(),
@@ -1785,11 +1626,15 @@ export default function App() {
           ]
         );
 
+        /* -------------------------------------------------
+           SPEAK
+           ------------------------------------------------- */
+
         if (
           settings.voiceEnabled
         ) {
           speakResponse(
-            fullResponse,
+            accumulatedText,
             requestId
           );
         } else {
@@ -1797,7 +1642,8 @@ export default function App() {
         }
 
         console.log(
-          `[JARVIS] Request completed: ${requestId}`
+          '[JARVIS] Response complete:',
+          requestId
         );
       }
 
@@ -1825,17 +1671,19 @@ export default function App() {
           error
         );
 
-        stopBrowserSpeech();
-
-        setAudioLevel(0);
+        const errorMessage =
+          error?.message ||
+          'Unknown Gemini connection error.';
 
         setState('error');
+
+        setAudioLevel(0);
 
         soundFx.playError(
           settings.soundEffects
         );
 
-        const message:
+        const errorMsg:
           Message = {
           id:
             assistantMessageId,
@@ -1844,7 +1692,7 @@ export default function App() {
             'assistant',
 
           content:
-            `I'm unable to reach the Gemini AI service. ${error?.message || 'Please check your API key and internet connection.'}`,
+            `My apologies, sir. ${errorMessage}`,
 
           timestamp:
             Date.now(),
@@ -1853,7 +1701,7 @@ export default function App() {
         setMessages(
           (previous) => [
             ...previous,
-            message,
+            errorMsg,
           ]
         );
 
@@ -1861,16 +1709,35 @@ export default function App() {
           null
         );
 
-        setTimeout(() => {
-          if (
-            activeRequestIdRef.current ===
-            requestId
-          ) {
-            setState(
-              'idle'
-            );
-          }
-        }, 1800);
+        setExecutionSteps(
+          (previous) => [
+            ...previous,
+            {
+              stage:
+                'completed',
+
+              label:
+                'Connection exception',
+
+              timestamp:
+                Date.now(),
+            },
+          ]
+        );
+
+        window.setTimeout(
+          () => {
+            if (
+              activeRequestIdRef.current ===
+              requestId
+            ) {
+              setState(
+                'idle'
+              );
+            }
+          },
+          1800
+        );
       }
 
       /* ===================================================
@@ -1904,40 +1771,51 @@ export default function App() {
 
   const handleActivateMic =
     () => {
+      try {
+        if (
+          'speechSynthesis' in
+          window
+        ) {
+          window.speechSynthesis.cancel();
+        }
+      } catch {
+        // Ignore
+      }
+
+      stopJarvisSpeech();
+
       if (
         state === 'speaking'
       ) {
-        stopBrowserSpeech();
-
-        setAudioLevel(0);
-
         setState(
           'interrupted'
         );
-
-        armMicrophone();
-
-        return;
       }
+
+      soundFx.playClick(
+        settings.soundEffects
+      );
 
       armMicrophone();
     };
 
   const armMicrophone =
     () => {
-      stopBrowserSpeech();
-
       stopSpeechRecognition();
 
-      soundFx.playReactorCharge(
-        settings.soundEffects
-      );
+      stopJarvisSpeech();
 
       setState(
         'listening'
       );
 
       setLiveTranscript('');
+
+      setAudioLevel(0);
+
+      soundFx.playReactorCharge(
+        settings.soundEffects
+      );
 
       startSpeechRecognition({
         onStart: () => {
@@ -1957,34 +1835,34 @@ export default function App() {
             return;
           }
 
-          if (!isFinal) {
-            setLiveTranscript(
-              text
-            );
-
-            return;
-          }
-
           setLiveTranscript(
             text
           );
 
-          stopSpeechRecognition();
+          if (
+            isFinal
+          ) {
+            stopSpeechRecognition();
 
-          processDirective(
-            text
-          );
+            processDirective(
+              text
+            );
+          }
         },
 
         onAudioLevel:
-          (level) => {
+          (
+            level
+          ) => {
             setAudioLevel(
               level
             );
           },
 
         onError:
-          (error) => {
+          (
+            error
+          ) => {
             console.warn(
               'Speech recognition:',
               error
@@ -1994,13 +1872,15 @@ export default function App() {
               'error'
             );
 
-            setAudioLevel(0);
+            setAudioLevel(
+              0
+            );
 
             soundFx.playError(
               settings.soundEffects
             );
 
-            setTimeout(
+            window.setTimeout(
               () =>
                 setState(
                   'idle'
@@ -2030,7 +1910,7 @@ export default function App() {
     };
 
   /* =======================================================
-     KEYBOARD
+     KEYBOARD SPACE
      ======================================================= */
 
   useEffect(() => {
@@ -2048,14 +1928,13 @@ export default function App() {
         const target =
           event.target as HTMLElement;
 
-        const typing =
+        if (
           target?.tagName ===
             'INPUT' ||
           target?.tagName ===
             'TEXTAREA' ||
-          target?.isContentEditable;
-
-        if (typing) {
+          target?.isContentEditable
+        ) {
           return;
         }
 
@@ -2092,19 +1971,22 @@ export default function App() {
   ]);
 
   /* =======================================================
-     TASKS
+     TASKS — LOCAL ONLY
      ======================================================= */
 
   const handleAddTask =
-    async (taskData: {
-      title: string;
-      due?: string;
-      priority:
-        | 'low'
-        | 'medium'
-        | 'high';
-    }) => {
-      const task: StarkTask =
+    async (
+      taskData: {
+        title: string;
+        due?: string;
+        priority:
+          | 'low'
+          | 'medium'
+          | 'high';
+      }
+    ) => {
+      const newTask:
+        StarkTask =
         {
           id:
             `task-${Date.now()}`,
@@ -2124,11 +2006,11 @@ export default function App() {
 
           createdAt:
             Date.now(),
-        };
+        } as StarkTask;
 
       setTasks(
         (previous) => [
-          task,
+          newTask,
           ...previous,
         ]
       );
@@ -2192,11 +2074,19 @@ export default function App() {
 
       setLiveTranscript('');
 
+      setExecutionSteps([]);
+
       setActiveTool(
         undefined
       );
 
-      setExecutionSteps([]);
+      try {
+        localStorage.removeItem(
+          MESSAGE_STORAGE
+        );
+      } catch {
+        // Ignore
+      }
 
       soundFx.playClick(
         settings.soundEffects
@@ -2261,10 +2151,6 @@ export default function App() {
           <div className="absolute bottom-0 left-0 w-3 h-3 border-b-2 border-l-2 border-cyan-400 pointer-events-none" />
 
           <div className="absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 border-cyan-400 pointer-events-none" />
-
-          {/* =================================================
-              COLUMNS
-              ================================================= */}
 
           <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] xl:grid-cols-[310px_1fr_310px] 2xl:grid-cols-[330px_1fr_330px] gap-3 lg:gap-4 items-start">
 
@@ -2411,13 +2297,11 @@ export default function App() {
             </div>
 
           </div>
-
         </div>
-
       </div>
 
       {/* ===================================================
-          MODALS
+          HISTORY
           =================================================== */}
 
       <ConversationHistoryModal
@@ -2439,6 +2323,10 @@ export default function App() {
           handleClearHistory
         }
       />
+
+      {/* ===================================================
+          SETTINGS
+          =================================================== */}
 
       <SettingsModal
         isOpen={
@@ -2464,6 +2352,10 @@ export default function App() {
         }
       />
 
+      {/* ===================================================
+          SYSTEM INFO
+          =================================================== */}
+
       <SystemInfoModal
         isOpen={
           isSystemInfoOpen
@@ -2483,6 +2375,10 @@ export default function App() {
           handleReplayBoot
         }
       />
+
+      {/* ===================================================
+          TASK TRACKER
+          =================================================== */}
 
       <TaskTrackerModal
         isOpen={
@@ -2512,6 +2408,10 @@ export default function App() {
         }
       />
 
+      {/* ===================================================
+          DESKTOP AGENT
+          =================================================== */}
+
       <DesktopAgentModal
         isOpen={
           isDesktopModalOpen
@@ -2523,6 +2423,10 @@ export default function App() {
           )
         }
       />
+
+      {/* ===================================================
+          RUNNING APPS
+          =================================================== */}
 
       <RunningAppsModal
         isOpen={
