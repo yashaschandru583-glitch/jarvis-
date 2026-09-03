@@ -39,9 +39,9 @@ import { ttsService } from './utils/ttsService';
 
 const DEFAULT_SETTINGS: AssistantSettings = {
   voiceEnabled: true,
-  voicePitch: 0.90, // Low & deep mature resonance
+  voicePitch: 0.90, // Low & deep mature resonance (0.85-0.95)
   voiceRate: 1.20, // Fast 1.20x cadence
-  voiceVolume: 0.80, // 80% volume
+  voiceVolume: 1.0, // 100% volume
   autoListen: false,
   interruptOnSpeech: true,
   streamingTts: true,
@@ -105,6 +105,30 @@ export default function App() {
   const [isSystemInfoOpen, setIsSystemInfoOpen] = useState(false);
   const [isDesktopModalOpen, setIsDesktopModalOpen] = useState(false);
   const [isRunningAppsOpen, setIsRunningAppsOpen] = useState(false);
+  const [isAutoplayBlocked, setIsAutoplayBlocked] = useState(false);
+
+  // Subscribe to autoplay block state and auto-unlock on user interaction
+  useEffect(() => {
+    const unsub = ttsService.subscribeAutoplayBlocked((blocked) => {
+      setIsAutoplayBlocked(blocked);
+    });
+
+    const handleUserInteraction = () => {
+      ttsService.unlockAudioContext();
+      setIsAutoplayBlocked(false);
+    };
+
+    window.addEventListener('click', handleUserInteraction, { passive: true });
+    window.addEventListener('touchstart', handleUserInteraction, { passive: true });
+    window.addEventListener('keydown', handleUserInteraction, { passive: true });
+
+    return () => {
+      unsub();
+      window.removeEventListener('click', handleUserInteraction);
+      window.removeEventListener('touchstart', handleUserInteraction);
+      window.removeEventListener('keydown', handleUserInteraction);
+    };
+  }, []);
 
   // Desktop Control Action HUD state
   const [desktopAction, setDesktopAction] = useState<DesktopActionDetail | null>(null);
@@ -798,6 +822,8 @@ export default function App() {
                 activeTool={activeTool}
                 desktopAction={desktopAction}
                 liveTranscript={liveTranscript}
+                isAutoplayBlocked={isAutoplayBlocked}
+                onDismissAutoplay={() => setIsAutoplayBlocked(false)}
                 onActivateMic={handleActivateMic}
                 onStop={handleStop}
                 onSubmitText={processDirective}

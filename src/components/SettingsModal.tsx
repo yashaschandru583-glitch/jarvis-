@@ -428,6 +428,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {/* TEST VOICE BUTTON */}
               <div className="pt-2">
                 <button
+                  id="test-voice-btn"
                   type="button"
                   onClick={() => {
                     if (isTestingVoice) {
@@ -436,11 +437,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     } else {
                       setIsTestingVoice(true);
                       ttsService.speak(
-                        'J.A.R.V.I.S. vocal synthesis online, sir. Calibrated for maximum operational efficiency and clarity.',
+                        'Hello. I am JARVIS. Voice communication is online.',
                         {
-                          pitch: settings.voicePitch,
-                          rate: settings.voiceRate,
-                          volume: settings.voiceVolume,
+                          pitch: settings.voicePitch ?? 0.90,
+                          rate: settings.voiceRate ?? 1.20,
+                          volume: settings.voiceVolume ?? 1.0,
                           preferredVoice: settings.preferredVoice,
                           onEnd: () => setIsTestingVoice(false),
                           onInterrupted: () => setIsTestingVoice(false),
@@ -455,7 +456,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   }`}
                 >
                   <Play className={`w-3.5 h-3.5 ${isTestingVoice ? 'fill-amber-400 text-amber-400' : 'fill-cyan-400 text-cyan-400'}`} />
-                  {isTestingVoice ? 'STOPPING VOICE TEST...' : 'TEST VOICE SYNTHESIS'}
+                  {isTestingVoice ? 'STOPPING VOICE TEST...' : 'TEST VOICE'}
                 </button>
               </div>
 

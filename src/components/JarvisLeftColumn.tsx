@@ -239,6 +239,22 @@ export const JarvisLeftColumn: React.FC<JarvisLeftColumnProps> = ({
               <div>VOICE LATENCY: <span className="text-cyan-300 font-bold">{(voiceMetrics.totalVoiceLatency ?? 0.60).toFixed(2)}s</span></div>
               <div>ENGINE: <span className="text-cyan-100 font-bold truncate">{voiceMetrics.providerName || 'Neural British (Ryan)'}</span></div>
             </div>
+
+            {/* Quick Test Voice Button */}
+            <button
+              id="hud-test-voice-btn"
+              type="button"
+              onClick={() => {
+                ttsService.speak(
+                  'Hello. I am JARVIS. Voice communication is online.',
+                  { rate: 1.20, pitch: 0.90, volume: 1.0 }
+                );
+              }}
+              className="w-full mt-2 py-1.5 px-2 rounded bg-cyan-950/40 hover:bg-cyan-900/60 border border-cyan-500/30 hover:border-cyan-400 text-cyan-200 hover:text-cyan-100 text-[10px] font-mono-tech flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-[0_0_10px_rgba(0,240,255,0.1)]"
+            >
+              <Volume2 className="w-3 h-3 text-cyan-400" />
+              <span>TEST VOICE</span>
+            </button>
           </div>
         </div>
       )}

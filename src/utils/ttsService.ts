@@ -1,6 +1,6 @@
 /**
  * J.A.R.V.I.S. High-Performance Neural Voice & Streaming TTS Pipeline
- * Ultra-Low Latency Audio Queue Architecture with Pre-Buffering & Zero-Lag Interruption
+ * Ultra-Low Latency Audio Queue Architecture with Pre-Buffering, SpeechSynthesis Fallback & Zero-Lag Interruption
  */
 
 import { VoiceMetrics } from '../types';
@@ -8,7 +8,7 @@ import { VoiceMetrics } from '../types';
 export interface TTSOptions {
   pitch?: number; // 0.7 - 1.2, default 0.90 (deep & mature)
   rate?: number; // 0.8 - 1.6, default 1.20 (fast & natural)
-  volume?: number; // 0 - 1, default 0.80
+  volume?: number; // 0 - 1, default 1.0
   preferredVoice?: string;
   streaming?: boolean;
   onStart?: () => void;
@@ -51,30 +51,73 @@ const INSTANT_PHRASES: Record<string, string> = {
 };
 
 /**
- * Strips markdown, code blocks, technical markup, and formatting
- * so that the spoken output sounds crisp, natural, and free of syntax tags.
+ * Strips markdown, code fences, raw URLs, JSON/tool metadata, citations and formatting
+ * so that spoken output is natural English free of syntax clutter.
  */
 export function cleanSpokenText(raw: string): string {
   if (!raw) return '';
   return raw
-    .replace(/```[\s\S]*?```/g, 'Code block generated.')
+    // Remove markdown code fences & code blocks
+    .replace(/```[\s\S]*?```/g, ' ')
+    // Remove inline code backticks
     .replace(/`([^`]+)`/g, '$1')
+    // Remove raw JSON objects, arrays or tool metadata
+    .replace(/\{[\s\S]*?\}/g, ' ')
+    // Remove reference brackets & citations e.g. [1], [citation: 2], 【4:0†source】
+    .replace(/\[\d+\]/g, '')
+    .replace(/\[citation:[^\]]+\]/gi, '')
+    .replace(/【[^】]+】/g, '')
+    // Convert markdown links [Text](url) to text
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/https?:\/\/\S+/g, '')
-    .replace(/[*#_~]/g, '')
+    // Remove raw URLs
+    .replace(/https?:\/\/\S+/gi, '')
+    // Remove headers, bullet points, numbered lists, blockquotes
+    .replace(/^#+\s+/gm, '')
+    .replace(/^[*\-+•]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
     .replace(/^>\s+/gm, '')
-    .replace(/\|.*\|/g, '')
-    .replace(/---+/g, '')
+    // Remove markdown formatting symbols
+    .replace(/[*_~|]/g, '')
+    // Remove system notices
+    .replace(/SYSTEM NOTICE:[^\n]*/gi, '')
+    .replace(/TOOL CALL:[^\n]*/gi, '')
+    // Clean horizontal rules
+    .replace(/---+/g, ' ')
+    .replace(/===+/g, ' ')
+    // Normalize spaces and trim
     .replace(/\s+/g, ' ')
     .trim();
 }
 
+let cachedVoices: SpeechSynthesisVoice[] = [];
+
+export function loadBrowserVoices(): SpeechSynthesisVoice[] {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return [];
+  const voices = window.speechSynthesis.getVoices();
+  if (voices && voices.length > 0) {
+    cachedVoices = voices;
+  }
+  return cachedVoices;
+}
+
+if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  loadBrowserVoices();
+  window.speechSynthesis.onvoiceschanged = () => {
+    loadBrowserVoices();
+  };
+  if (window.speechSynthesis.addEventListener) {
+    window.speechSynthesis.addEventListener('voiceschanged', () => {
+      loadBrowserVoices();
+    });
+  }
+}
+
 /**
- * Selects the optimal deep British male voice for browser speech fallback
+ * Selects optimal British English male voice for browser speech fallback
  */
 export function selectBritishMaleVoice(preferredName?: string): SpeechSynthesisVoice | undefined {
-  if (typeof window === 'undefined' || !window.speechSynthesis) return undefined;
-  const voices = window.speechSynthesis.getVoices();
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return undefined;
+  const voices = loadBrowserVoices();
   if (!voices || voices.length === 0) return undefined;
 
   // 1. Explicit user preference
@@ -97,6 +140,8 @@ export function selectBritishMaleVoice(preferredName?: string): SpeechSynthesisV
     'Malcolm',
     'en-GB-Neural2-B',
     'en-GB-Standard-B',
+    'en-GB-Wavenet-B',
+    'en-GB-Wavenet-D',
   ];
 
   for (const name of prioritizedNames) {
@@ -106,13 +151,13 @@ export function selectBritishMaleVoice(preferredName?: string): SpeechSynthesisV
 
   // 3. Any UK English voice with 'male' in descriptor
   const ukMale = voices.find(
-    (v) => (v.lang === 'en-GB' || v.lang === 'en_GB') && 
+    (v) => (v.lang === 'en-GB' || v.lang === 'en_GB' || v.lang.startsWith('en-GB')) && 
            (v.name.toLowerCase().includes('male') || !v.name.toLowerCase().includes('female'))
   );
   if (ukMale) return ukMale;
 
   // 4. Any en-GB voice
-  const ukVoice = voices.find((v) => v.lang === 'en-GB' || v.lang === 'en_GB');
+  const ukVoice = voices.find((v) => v.lang === 'en-GB' || v.lang === 'en_GB' || v.lang.startsWith('en-GB'));
   if (ukVoice) return ukVoice;
 
   // 5. Any Natural English male voice
@@ -122,7 +167,11 @@ export function selectBritishMaleVoice(preferredName?: string): SpeechSynthesisV
   );
   if (naturalMale) return naturalMale;
 
-  return voices.find((v) => v.lang.startsWith('en')) || voices[0];
+  // 6. Any English voice
+  const anyEnglish = voices.find((v) => v.lang.startsWith('en'));
+  if (anyEnglish) return anyEnglish;
+
+  return voices[0];
 }
 
 /**
@@ -145,6 +194,9 @@ export class JarvisTTSService {
   private hasEmittedFirstSound = false;
   private activeRequestId = '';
   private processedSentenceIds: Set<string> = new Set();
+  private spokenResponseIds: Set<string> = new Set();
+  private activeUtterances: Set<SpeechSynthesisUtterance> = new Set();
+  private resumeHeartbeat: any = null;
 
   // Telemetry metrics
   private activeMetrics: VoiceMetrics = {
@@ -163,17 +215,13 @@ export class JarvisTTSService {
 
   // Web Audio Context & Real Frequency Analyser
   private audioCtx: AudioContext | null = null;
-  private analyser: AnalyserNode | null = null;
   private visualizerRaf: number | null = null;
   private metricsListeners: Array<(metrics: VoiceMetrics) => void> = [];
-  private stateListeners: Array<(state: 'idle' | 'generating' | 'speaking' | 'interrupted') => void> = [];
+  private stateListeners: Array<(state: 'idle' | 'generating' | 'speaking' | 'interrupted' | 'error') => void> = [];
+  private autoplayBlockedListeners: Array<(blocked: boolean) => void> = [];
 
   constructor() {
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.onvoiceschanged = () => {
-        // Ready voices list
-      };
-    }
+    loadBrowserVoices();
   }
 
   public unlockAudioContext() {
@@ -187,7 +235,11 @@ export class JarvisTTSService {
       if (this.audioCtx && this.audioCtx.state === 'suspended') {
         this.audioCtx.resume().catch(() => {});
       }
+      if (typeof window !== 'undefined' && window.speechSynthesis && window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
     } catch (_) {}
+    this.notifyAutoplayBlocked(false);
   }
 
   public subscribeMetrics(fn: (metrics: VoiceMetrics) => void) {
@@ -198,14 +250,25 @@ export class JarvisTTSService {
     };
   }
 
-  public subscribeState(fn: (state: 'idle' | 'generating' | 'speaking' | 'interrupted') => void) {
+  public subscribeState(fn: (state: 'idle' | 'generating' | 'speaking' | 'interrupted' | 'error') => void) {
     this.stateListeners.push(fn);
     return () => {
       this.stateListeners = this.stateListeners.filter((l) => l !== fn);
     };
   }
 
-  private notifyState(state: 'idle' | 'generating' | 'speaking' | 'interrupted') {
+  public subscribeAutoplayBlocked(fn: (blocked: boolean) => void) {
+    this.autoplayBlockedListeners.push(fn);
+    return () => {
+      this.autoplayBlockedListeners = this.autoplayBlockedListeners.filter((l) => l !== fn);
+    };
+  }
+
+  public notifyAutoplayBlocked(blocked: boolean) {
+    this.autoplayBlockedListeners.forEach((l) => l(blocked));
+  }
+
+  private notifyState(state: 'idle' | 'generating' | 'speaking' | 'interrupted' | 'error') {
     this.stateListeners.forEach((l) => l(state));
   }
 
@@ -224,9 +287,17 @@ export class JarvisTTSService {
   }
 
   /**
-   * Begins a new streaming voice session
+   * Begins a new streaming voice session with request deduplication
    */
   public startStreaming(options: TTSOptions = {}, promptStartTime?: number, requestId?: string) {
+    if (requestId) {
+      if (this.spokenResponseIds.has(requestId)) {
+        console.log(`[JARVIS TTS] Response already spoken, skipping duplicate: ${requestId}`);
+        return;
+      }
+      this.spokenResponseIds.add(requestId);
+    }
+
     this.cancelTTS();
     this.unlockAudioContext();
     this.isInterrupted = false;
@@ -235,11 +306,13 @@ export class JarvisTTSService {
     this.activeRequestId = requestId || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tts-${Date.now()}`);
     this.processedSentenceIds.clear();
 
+    console.log('[JARVIS TTS] Starting speech');
+
     this.options = {
-      pitch: options.pitch ?? 0.90, // Deep, calm, mature tone
-      rate: options.rate ?? 1.20, // Default 1.20x speed
-      volume: options.volume ?? 0.80, // 80% clear volume
-      preferredVoice: options.preferredVoice || 'en-GB-RyanNeural',
+      pitch: options.pitch ?? 0.90, // Deep, calm, mature tone (0.85-0.95)
+      rate: options.rate ?? 1.20, // Fast 1.20x cadence
+      volume: options.volume ?? 1.0, // Full 1.0 clear volume
+      preferredVoice: options.preferredVoice || '',
       ...options,
     };
 
@@ -253,6 +326,21 @@ export class JarvisTTSService {
     this.activeMetrics.voiceActive = false;
     this.activeMetrics.currentChunkIndex = 0;
     this.notifyMetrics();
+
+    // Start background speech synthesis resume heartbeat (fixes Chrome pausing bug)
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      if (this.resumeHeartbeat) clearInterval(this.resumeHeartbeat);
+      this.resumeHeartbeat = setInterval(() => {
+        if (!this.isSpeaking || this.isInterrupted) {
+          clearInterval(this.resumeHeartbeat);
+          this.resumeHeartbeat = null;
+          return;
+        }
+        if (window.speechSynthesis && window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        }
+      }, 2500);
+    }
   }
 
   /**
@@ -265,10 +353,10 @@ export class JarvisTTSService {
     this.sentenceBuffer += token;
 
     // Sentence boundary detection:
-    // 1. Natural terminal punctuation (. ! ? \n) followed by space or end
-    // 2. Early clause break (, ; :) if buffer exceeds 45 characters on first chunk to start voice immediately
-    let match = this.sentenceBuffer.match(/([.!?\n]+)(\s+|$)/);
-    if (!match && this.sentenceIndex === 0 && this.sentenceBuffer.length > 45) {
+    // 1. Natural terminal punctuation (. ! ? \n) followed by whitespace, quotes, or end
+    // 2. Early clause break (, ; :) if buffer exceeds 50 chars on first chunk
+    let match = this.sentenceBuffer.match(/([.!?\n]+)([\s"']|$)/);
+    if (!match && this.sentenceIndex === 0 && this.sentenceBuffer.length > 50) {
       match = this.sentenceBuffer.match(/([,;:])\s+/);
     }
 
@@ -282,12 +370,12 @@ export class JarvisTTSService {
         this.enqueueTTS(cleaned);
       }
 
-      match = this.sentenceBuffer.match(/([.!?\n]+)(\s+|$)/);
+      match = this.sentenceBuffer.match(/([.!?\n]+)([\s"']|$)/);
     }
   }
 
   /**
-   * Finalizes the incoming stream
+   * Finalizes incoming stream and flushes any trailing text
    */
   public finishStream() {
     if (this.isInterrupted) return;
@@ -316,7 +404,6 @@ export class JarvisTTSService {
 
     const sentenceId = `${this.activeRequestId || 'tts'}-${this.sentenceIndex}`;
     if (this.processedSentenceIds.has(sentenceId)) {
-      console.log(`[TTS DEDUPLICATION] Sentence already processed, ignoring: ${sentenceId}`);
       return;
     }
     this.processedSentenceIds.add(sentenceId);
@@ -344,12 +431,12 @@ export class JarvisTTSService {
 
   /**
    * Fetches synthesized audio bytes from server neural TTS (/api/tts/chunk)
+   * If server is unavailable (e.g. GitHub Pages or offline), seamlessly flags chunk for browser fallback.
    */
   private async fetchChunkAudio(task: AudioQueueItem) {
     if (this.isInterrupted || task.status !== 'queued') return;
     task.status = 'fetching';
 
-    // Record TTS request initiation timestamp
     if (task.index === 0) {
       const reqLatency = parseFloat(((task.requestStartTime - this.sessionStartTime) / 1000).toFixed(2));
       this.activeMetrics.ttsRequestLatency = Math.max(0.01, reqLatency);
@@ -373,6 +460,11 @@ export class JarvisTTSService {
         throw new Error(`TTS server HTTP ${res.status}`);
       }
 
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('audio') && !contentType.includes('mpeg')) {
+        throw new Error(`Non-audio response from TTS: ${contentType}`);
+      }
+
       const blob = await res.blob();
       if (this.isInterrupted || task.abortController.signal.aborted) return;
 
@@ -380,8 +472,8 @@ export class JarvisTTSService {
       task.audioBlob = blob;
       task.audioUrl = URL.createObjectURL(blob);
       task.status = 'ready';
+      task.isFallback = false;
 
-      // Record TTFA (Time to First Audio)
       if (task.index === 0) {
         const firstAudioSec = parseFloat(((task.firstAudioTime - task.requestStartTime) / 1000).toFixed(2));
         this.activeMetrics.ttsFirstAudioLatency = Math.max(0.05, firstAudioSec);
@@ -389,16 +481,14 @@ export class JarvisTTSService {
         this.notifyMetrics();
       }
 
-      // Update nextAudio buffer pointer for seamless transition
       this.updateNextAudioPointer();
 
-      // If active playback is waiting on this chunk, play it immediately!
       if (!this.isSpeaking) {
         this.processQueue();
       }
     } catch (err: any) {
       if (task.abortController.signal.aborted || this.isInterrupted) return;
-      console.warn(`[TTS] Server chunk synthesis failed, using browser fallback:`, err.message || err);
+      console.log('[JARVIS TTS] Backend TTS failed, using browser fallback');
       task.status = 'ready';
       task.isFallback = true;
 
@@ -415,12 +505,11 @@ export class JarvisTTSService {
   }
 
   /**
-   * Coordinates playback of the current item and triggers pre-buffering of the next item
+   * Coordinates playback of current item and triggers pre-buffering of subsequent items
    */
   public processQueue() {
     if (this.isInterrupted) return;
 
-    // Find the next item to play
     const candidate = this.ttsQueue.find((item) => item.status === 'ready' || item.status === 'queued' || item.status === 'fetching');
 
     if (!candidate) {
@@ -437,11 +526,10 @@ export class JarvisTTSService {
     if (candidate.status === 'ready') {
       this.playAudio(candidate);
     } else {
-      // Still fetching; fetchChunkAudio will call processQueue() the instant it resolves
       this.notifyState('generating');
     }
 
-    // PRE-GENERATE NEXT AUDIO: Look ahead in the queue and trigger fetch for the next queued item
+    // PRE-GENERATE NEXT AUDIO: Look ahead in queue and trigger fetch for upcoming queued items
     const upcomingQueue = this.ttsQueue.filter((item) => item.status === 'queued');
     for (const upcoming of upcomingQueue) {
       this.fetchChunkAudio(upcoming);
@@ -463,7 +551,6 @@ export class JarvisTTSService {
     this.notifyMetrics();
     this.notifyState('speaking');
 
-    // Trigger initial onStart callback once and compute real total voice latency
     if (!this.hasEmittedFirstSound) {
       this.hasEmittedFirstSound = true;
       const totalLatency = parseFloat(((performance.now() - this.sessionStartTime) / 1000).toFixed(2));
@@ -480,17 +567,21 @@ export class JarvisTTSService {
       return;
     }
 
-    // Primary path: Instant Web Audio / HTMLAudioElement playback
+    // Primary path: Direct HTMLAudioElement hardware playback
     try {
       const audio = new Audio(task.audioUrl);
       task.audioElement = audio;
-      audio.playbackRate = 1.0; // Speed is baked into neural audio at 1.20x!
-      audio.volume = Math.max(0, Math.min(1, this.options.volume ?? 0.80));
+      audio.playbackRate = 1.0;
+      audio.volume = Math.max(0, Math.min(1, this.options.volume ?? 1.0));
 
-      this.connectAudioElementToAnalyser(audio);
       this.startVisualizer();
 
+      audio.onplay = () => {
+        console.log('[JARVIS TTS] Speech started');
+      };
+
       audio.onended = () => {
+        console.log('[JARVIS TTS] Speech ended');
         task.status = 'completed';
         if (task.audioUrl) URL.revokeObjectURL(task.audioUrl);
         this.options.onSentenceEnd?.(task.index);
@@ -499,60 +590,105 @@ export class JarvisTTSService {
 
       audio.onerror = (e) => {
         console.warn('Audio element error, falling back to speech synthesis:', e);
+        console.log('[JARVIS TTS] Backend TTS failed, using browser fallback');
         this.playBrowserFallback(task);
       };
 
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         playPromise.catch((err) => {
-          console.warn('Audio play() autoplay constraint, attempting fallback:', err);
+          if (err.name === 'NotAllowedError') {
+            console.warn('[JARVIS TTS] Autoplay restriction encountered');
+            this.notifyAutoplayBlocked(true);
+          }
+          console.log('[JARVIS TTS] Backend TTS failed, using browser fallback');
           this.playBrowserFallback(task);
         });
       }
     } catch (err) {
-      console.error('Audio initialization failure, trying fallback:', err);
+      console.log('[JARVIS TTS] Backend TTS failed, using browser fallback');
       this.playBrowserFallback(task);
     }
   }
 
   /**
-   * Browser Speech Synthesis fallback
+   * High-reliability Browser Speech Synthesis fallback
+   * Handles voice selection, utterance retention against GC, paused states, and onend transitions
    */
   private playBrowserFallback(task: AudioQueueItem) {
     if (this.isInterrupted) return;
-    if (typeof window === 'undefined' || !window.speechSynthesis) {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      console.warn('[JARVIS TTS] Speech synthesis unavailable');
+      this.notifyState('error');
+      task.status = 'completed';
       this.playNextAudio();
       return;
     }
 
+    // Unpause speech synthesis if browser paused it
+    try {
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+    } catch (_) {}
+
     const utterance = new SpeechSynthesisUtterance(task.text);
+    // Retain utterance in active Set to prevent V8 garbage collection
+    this.activeUtterances.add(utterance);
+
     const voice = selectBritishMaleVoice(this.options.preferredVoice);
     if (voice) {
       utterance.voice = voice;
+      utterance.lang = voice.lang || 'en-GB';
+      console.log('[JARVIS TTS] Selected voice:', voice.name);
       this.activeMetrics.providerName = `${voice.name.replace(/Online \(Natural\)/i, 'Neural')} [Fallback]`;
       this.notifyMetrics();
+    } else {
+      utterance.lang = 'en-GB';
+      console.log('[JARVIS TTS] Selected voice: System Default en-GB Voice');
     }
 
     utterance.rate = Math.max(0.8, Math.min(1.6, this.options.rate ?? 1.20));
     utterance.pitch = Math.max(0.7, Math.min(1.2, this.options.pitch ?? 0.90));
-    utterance.volume = Math.max(0, Math.min(1, this.options.volume ?? 0.80));
+    utterance.volume = Math.max(0, Math.min(1, this.options.volume ?? 1.0));
 
-    this.startVisualizer();
+    utterance.onstart = () => {
+      console.log('[JARVIS TTS] Speech started');
+      this.startVisualizer();
+      this.notifyState('speaking');
+    };
 
     utterance.onend = () => {
+      this.activeUtterances.delete(utterance);
+      console.log('[JARVIS TTS] Speech ended');
       task.status = 'completed';
       this.options.onSentenceEnd?.(task.index);
       this.playNextAudio();
     };
 
-    utterance.onerror = () => {
+    utterance.onerror = (e: any) => {
+      this.activeUtterances.delete(utterance);
+      if (e.error === 'interrupted' || e.error === 'canceled') {
+        return;
+      }
+      if (e.error === 'not-allowed') {
+        console.warn('[JARVIS TTS] Autoplay restriction encountered');
+        this.notifyAutoplayBlocked(true);
+      } else {
+        console.warn('[JARVIS TTS] Speech synthesis utterance error:', e.error || e);
+      }
       task.status = 'completed';
       this.playNextAudio();
     };
 
     try {
       window.speechSynthesis.speak(utterance);
-    } catch (_) {
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+    } catch (err) {
+      console.warn('[JARVIS TTS] Speech synthesis speak() invocation error:', err);
+      this.activeUtterances.delete(utterance);
       this.playNextAudio();
     }
   }
@@ -563,7 +699,6 @@ export class JarvisTTSService {
   public playNextAudio() {
     if (this.isInterrupted) return;
 
-    // Remove completed item from queue
     if (this.currentAudio) {
       this.ttsQueue = this.ttsQueue.filter((item) => item.id !== this.currentAudio?.id);
       this.currentAudio = null;
@@ -571,7 +706,6 @@ export class JarvisTTSService {
 
     this.updateNextAudioPointer();
 
-    // Check if next item is already ready
     if (this.nextAudio && this.nextAudio.status === 'ready') {
       this.playAudio(this.nextAudio);
     } else {
@@ -590,7 +724,11 @@ export class JarvisTTSService {
   public cancelTTS() {
     this.isInterrupted = true;
 
-    // Stop current audio element
+    if (this.resumeHeartbeat) {
+      clearInterval(this.resumeHeartbeat);
+      this.resumeHeartbeat = null;
+    }
+
     if (this.currentAudio?.audioElement) {
       try {
         this.currentAudio.audioElement.pause();
@@ -598,7 +736,6 @@ export class JarvisTTSService {
       } catch (_) {}
     }
 
-    // Abort all in-flight fetch requests & revoke blob URLs
     for (const item of this.ttsQueue) {
       item.abortController.abort();
       if (item.audioUrl) {
@@ -612,12 +749,15 @@ export class JarvisTTSService {
       }
     }
 
-    // Cancel browser speech synthesis if running
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
+        if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        }
       } catch (_) {}
     }
+    this.activeUtterances.clear();
 
     this.ttsQueue = [];
     this.currentAudio = null;
@@ -641,7 +781,7 @@ export class JarvisTTSService {
   }
 
   /**
-   * Fast-path static text speaker
+   * Fast-path static text speaker with deduplication
    */
   public speak(text: string, options: TTSOptions = {}, requestId?: string) {
     const cleaned = cleanSpokenText(text);
@@ -650,7 +790,8 @@ export class JarvisTTSService {
       return;
     }
 
-    this.startStreaming(options, performance.now(), requestId);
+    const effectiveId = requestId || `tts-standalone-${Date.now()}`;
+    this.startStreaming(options, performance.now(), effectiveId);
     this.pushToken(cleaned);
     this.finishStream();
   }
@@ -669,35 +810,12 @@ export class JarvisTTSService {
   }
 
   /**
-   * Connects HTMLAudioElement to Web Audio AnalyserNode for live Arc Reactor sync
-   */
-  private connectAudioElementToAnalyser(audio: HTMLAudioElement) {
-    try {
-      this.unlockAudioContext();
-      if (!this.audioCtx) return;
-
-      if (!this.analyser) {
-        this.analyser = this.audioCtx.createAnalyser();
-        this.analyser.fftSize = 64;
-        this.analyser.smoothingTimeConstant = 0.5;
-        this.analyser.connect(this.audioCtx.destination);
-      }
-
-      const source = this.audioCtx.createMediaElementSource(audio);
-      source.connect(this.analyser);
-    } catch (_) {
-      // Browser cross-origin or already connected audio elements fall back to simulated visualizer
-    }
-  }
-
-  /**
    * Real-time vocal amplitude visualizer loop
    */
   private startVisualizer() {
     if (this.visualizerRaf !== null) return;
 
     let tick = 0;
-    const freqData = this.analyser ? new Uint8Array(this.analyser.frequencyBinCount) : null;
 
     const loop = () => {
       if (!this.isSpeaking || this.isInterrupted) {
@@ -706,22 +824,10 @@ export class JarvisTTSService {
       }
 
       tick++;
-      let level = 0;
-
-      if (this.analyser && freqData) {
-        this.analyser.getByteFrequencyData(freqData);
-        let sum = 0;
-        for (let i = 0; i < freqData.length; i++) {
-          sum += freqData[i];
-        }
-        const avg = sum / (freqData.length || 1);
-        level = Math.min(1, Math.max(0.1, avg / 110));
-      } else {
-        // Natural British vocal inflection simulator: rhythmic pulses matching spoken cadences
-        const pulse = Math.abs(Math.sin(tick * 0.18) * Math.cos(tick * 0.08));
-        const variance = (Math.sin(tick * 0.45) + 1) * 0.2;
-        level = Math.min(1, Math.max(0.18, 0.35 + pulse * 0.45 + variance));
-      }
+      // Natural British vocal inflection simulator: rhythmic pulses matching spoken cadences
+      const pulse = Math.abs(Math.sin(tick * 0.18) * Math.cos(tick * 0.08));
+      const variance = (Math.sin(tick * 0.45) + 1) * 0.2;
+      const level = Math.min(1, Math.max(0.18, 0.35 + pulse * 0.45 + variance));
 
       this.options.onAudioLevel?.(level);
       this.visualizerRaf = requestAnimationFrame(loop);
@@ -741,3 +847,4 @@ export class JarvisTTSService {
 
 // Global Singleton Instance
 export const ttsService = new JarvisTTSService();
+

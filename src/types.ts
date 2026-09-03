@@ -71,7 +71,7 @@ export interface AssistantSettings {
   voiceEnabled: boolean;
   voicePitch: number; // 0.7 - 1.2 (default 0.90 - deep/mature)
   voiceRate: number; // 0.8 - 1.6 (default 1.20)
-  voiceVolume: number; // 0 - 1 (default 0.80)
+  voiceVolume: number; // 0 - 1 (default 1.0)
   autoListen: boolean; // Auto-listen after speech
   interruptOnSpeech: boolean; // Interrupt playback when user speaks
   streamingTts: boolean; // Stream first sentence immediately

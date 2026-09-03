@@ -6,10 +6,12 @@ import {
   X,
   Sparkles,
   Terminal,
-  Cpu
+  Cpu,
+  Volume2
 } from 'lucide-react';
 import { ArcReactor } from './ArcReactor';
 import { AssistantState, Message, DesktopActionDetail, ToolExecution } from '../types';
+import { ttsService } from '../utils/ttsService';
 
 interface JarvisCenterColumnProps {
   state: AssistantState;
@@ -19,6 +21,8 @@ interface JarvisCenterColumnProps {
   activeTool?: ToolExecution | null;
   desktopAction?: DesktopActionDetail | null;
   liveTranscript?: string;
+  isAutoplayBlocked?: boolean;
+  onDismissAutoplay?: () => void;
   onActivateMic: () => void;
   onStop: () => void;
   onSubmitText: (text: string) => void;
@@ -36,6 +40,8 @@ export const JarvisCenterColumn: React.FC<JarvisCenterColumnProps> = ({
   activeTool,
   desktopAction,
   liveTranscript,
+  isAutoplayBlocked,
+  onDismissAutoplay,
   onActivateMic,
   onStop,
   onSubmitText,
@@ -182,6 +188,34 @@ export const JarvisCenterColumn: React.FC<JarvisCenterColumnProps> = ({
           );
         })}
       </div>
+
+      {/* Autoplay restriction warning banner */}
+      {isAutoplayBlocked && (
+        <div 
+          onClick={() => {
+            ttsService.unlockAudioContext();
+            onDismissAutoplay?.();
+          }}
+          className="w-full mb-2.5 p-2 rounded bg-amber-950/70 border border-amber-500/60 text-amber-200 text-xs font-mono-tech flex items-center justify-between gap-2 shadow-[0_0_15px_rgba(245,158,11,0.25)] cursor-pointer animate-pulse"
+        >
+          <div className="flex items-center gap-2">
+            <Volume2 className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Click the microphone or Test Voice button to enable voice.</span>
+          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              ttsService.unlockAudioContext();
+              onDismissAutoplay?.();
+              ttsService.speak('Hello. I am JARVIS. Voice communication is online.');
+            }}
+            className="px-2.5 py-1 rounded bg-amber-500/30 hover:bg-amber-500/50 text-amber-100 text-[10px] font-bold border border-amber-400/60 uppercase tracking-wider transition-colors cursor-pointer"
+          >
+            ENABLE VOICE
+          </button>
+        </div>
+      )}
 
       {/* 3. COMMAND INPUT BOX WITH PROTRUDING CENTER MIC BUTTON */}
       <div className="w-full relative mt-1 mb-6">
