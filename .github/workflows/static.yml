@@ -31,8 +31,17 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build JARVIS
+      - name: Build frontend
         run: npm run build
+
+      - name: Verify production files
+        run: |
+          echo "=== DIST CONTENTS ==="
+          find dist -maxdepth 3 -type f -print
+          echo "=== INDEX.HTML ==="
+          cat dist/index.html
+          echo "=== ASSETS ==="
+          ls -lah dist/assets
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
@@ -45,7 +54,6 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     runs-on: ubuntu-latest
-
     needs: build
 
     environment:
@@ -53,6 +61,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Deploy JARVIS
+      - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
