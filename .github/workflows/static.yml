@@ -34,34 +34,20 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Prepare GitHub Pages site
+      - name: Check build
         run: |
-          rm -rf site
-          mkdir -p site
-          cp -r dist/. site/
-
-          touch site/.nojekyll
-
-          echo "=== PAGES SITE ==="
-          find site -maxdepth 3 -type f -print
-
-          echo "=== ASSETS ==="
-          ls -lah site/assets
-
-      - name: Verify asset files
-        run: |
-          test -f site/index.html
-          test -f site/assets/index-PyY-iPzW.js
-          test -f site/assets/index-Dyvi6G26.css
-          echo "JARVIS frontend files verified successfully."
+          echo "===== BUILD OUTPUT ====="
+          find ./dist -maxdepth 3 -type f -print
+          echo "===== INDEX ====="
+          cat ./dist/index.html
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload Pages site
+      - name: Upload production build
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./site
+          path: ./dist
 
   deploy:
     name: Deploy to GitHub Pages
