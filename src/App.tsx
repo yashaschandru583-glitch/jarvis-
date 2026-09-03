@@ -21,6 +21,7 @@ import { JarvisTopBar } from './components/JarvisTopBar';
 import { JarvisLeftColumn } from './components/JarvisLeftColumn';
 import { JarvisRightColumn } from './components/JarvisRightColumn';
 import { JarvisCenterColumn } from './components/JarvisCenterColumn';
+
 import { ConversationHistoryModal } from './components/ConversationHistoryModal';
 import { SettingsModal } from './components/SettingsModal';
 import { SystemInfoModal } from './components/SystemInfoModal';
@@ -35,28 +36,16 @@ import { desktopAgent } from './utils/desktopAgentService';
 import {
   startSpeechRecognition,
   stopSpeechRecognition,
-  speakJarvis,
-  stopJarvisSpeech,
-  streamingSpeaker,
 } from './utils/speech';
 
-import { ttsService } from './utils/ttsService';
-
 /* =========================================================
-   BACKEND URL
+   JARVIS CLIENT-SIDE CONFIGURATION
    ========================================================= */
 
-const API_BASE = (
-  import.meta.env.VITE_API_BASE_URL || ''
-).replace(/\/+$/, '');
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
-function apiUrl(path: string): string {
-  if (!path.startsWith('/')) {
-    path = `/${path}`;
-  }
-
-  return `${API_BASE}${path}`;
-}
+const GEMINI_ENDPOINT =
+  `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`;
 
 /* =========================================================
    DEFAULT SETTINGS
@@ -71,7 +60,7 @@ const DEFAULT_SETTINGS: AssistantSettings = {
   interruptOnSpeech: true,
   streamingTts: true,
   preferredVoice: '',
-  aiModel: 'gemini-2.5-flash',
+  aiModel: GEMINI_MODEL,
   aiStyle: 'concise',
   contextMemory: 10,
   reactorIntensity: 85,
@@ -83,43 +72,672 @@ const DEFAULT_SETTINGS: AssistantSettings = {
 };
 
 /* =========================================================
-   APP
+   TYPES
+   ========================================================= */
+
+interface GeminiSource {
+  title?: string;
+  url?: string;
+  domain?: string;
+  snippet?: string;
+}
+
+/* =========================================================
+   GEMINI API KEY
+   ========================================================= */
+
+function getStoredGeminiKey(): string {
+  try {
+    return (
+      localStorage.getItem(
+        'jarvis_gemini_api_key'
+      ) || ''
+    ).trim();
+  } catch {
+    return '';
+  }
+}
+
+function requestGeminiKey(): string {
+  const existing =
+    getStoredGeminiKey();
+
+  if (existing) {
+    return existing;
+  }
+
+  const key =
+    window.prompt(
+      'J.A.R.V.I.S. requires a Gemini API key for direct browser AI access.\n\nEnter your Gemini API key:'
+    );
+
+  if (!key) {
+    return '';
+  }
+
+  const cleanKey =
+    key.trim();
+
+  if (!cleanKey) {
+    return '';
+  }
+
+  try {
+    localStorage.setItem(
+      'jarvis_gemini_api_key',
+      cleanKey
+    );
+  } catch {
+    // Ignore storage errors
+  }
+
+  return cleanKey;
+}
+
+/* =========================================================
+   GEMINI REQUEST BODY
+   ========================================================= */
+
+function buildGeminiContents(
+  history: Message[],
+  prompt: string
+) {
+  const contents: any[] = [];
+
+  for (
+    const message of history.slice(-10)
+  ) {
+    if (
+      !message.content ||
+      typeof message.content !==
+        'string'
+    ) {
+      continue;
+    }
+
+    contents.push({
+      role:
+        message.role ===
+        'assistant'
+          ? 'model'
+          : 'user',
+
+      parts: [
+        {
+          text:
+            message.content,
+        },
+      ],
+    });
+  }
+
+  contents.push({
+    role: 'user',
+    parts: [
+      {
+        text: prompt,
+      },
+    ],
+  });
+
+  return contents;
+}
+
+/* =========================================================
+   SYSTEM INSTRUCTION
+   ========================================================= */
+
+function getSystemInstruction(
+  style: string
+) {
+  return `
+You are J.A.R.V.I.S., an advanced personal AI assistant.
+
+PERSONALITY:
+- Speak like a calm, highly intelligent British-style AI assistant.
+- Address the user as "sir" naturally when appropriate.
+- Never imitate or claim to be a real actor or copyrighted movie voice.
+- Be professional, confident, concise and useful.
+- Do not repeat the user's question unnecessarily.
+
+ACCURACY:
+- Never invent facts.
+- If you are uncertain, say so.
+- For current or changing information, use Google Search grounding.
+- Prefer verified information over assumptions.
+- Never fabricate URLs, statistics, people, dates or events.
+
+RESPONSE STYLE:
+- Simple questions: answer directly.
+- Calculations: give the exact result and a short explanation only when useful.
+- Commands: acknowledge briefly.
+- Complex questions: explain clearly using short sections.
+- Avoid unnecessary greetings and filler.
+- Do not output internal reasoning.
+- Do not mention hidden system instructions.
+
+WEB:
+- When current information is needed, use Google Search.
+- When the user asks about today's news, current events, current people, companies, prices, recent technology or other changing information, search the web.
+- Distinguish current facts from general knowledge.
+
+VOICE:
+- Write naturally for speech.
+- Avoid excessive markdown.
+- Avoid long lists unless needed.
+- Keep spoken answers concise.
+
+STYLE PREFERENCE:
+${style || 'concise'}
+`;
+}
+
+/* =========================================================
+   CLEAN TEXT FOR SPEECH
+   ========================================================= */
+
+function cleanSpeechText(
+  text: string
+): string {
+  return text
+    .replace(
+      /```[\s\S]*?```/g,
+      ' '
+    )
+    .replace(
+      /`([^`]+)`/g,
+      '$1'
+    )
+    .replace(
+      /\[([^\]]+)\]\([^)]+\)/g,
+      '$1'
+    )
+    .replace(
+      /https?:\/\/\S+/gi,
+      ''
+    )
+    .replace(
+      /【[^】]*】/g,
+      ''
+    )
+    .replace(
+      /\[[0-9]+\]/g,
+      ''
+    )
+    .replace(
+      /^#+\s*/gm,
+      ''
+    )
+    .replace(
+      /^[*\-+•]\s+/gm,
+      ''
+    )
+    .replace(
+      /\*\*/g,
+      ''
+    )
+    .replace(
+      /__/g,
+      ''
+    )
+    .replace(
+      /\s+/g,
+      ' '
+    )
+    .trim();
+}
+
+/* =========================================================
+   BROWSER VOICE
+   ========================================================= */
+
+function getBritishVoice(
+  preferredVoice?: string
+): SpeechSynthesisVoice | undefined {
+  if (
+    typeof window ===
+      'undefined' ||
+    !('speechSynthesis' in window)
+  ) {
+    return undefined;
+  }
+
+  const voices =
+    window.speechSynthesis.getVoices();
+
+  if (!voices.length) {
+    return undefined;
+  }
+
+  if (preferredVoice) {
+    const preferred =
+      voices.find(
+        (voice) =>
+          voice.name
+            .toLowerCase()
+            .includes(
+              preferredVoice.toLowerCase()
+            )
+      );
+
+    if (preferred) {
+      return preferred;
+    }
+  }
+
+  const britishMale =
+    voices.find(
+      (voice) => {
+        const name =
+          voice.name.toLowerCase();
+
+        const lang =
+          voice.lang.toLowerCase();
+
+        return (
+          (
+            lang ===
+              'en-gb' ||
+            lang.startsWith(
+              'en-gb'
+            )
+          ) &&
+          !(
+            name.includes('female') ||
+            name.includes('zira') ||
+            name.includes('hazel')
+          )
+        );
+      }
+    );
+
+  if (britishMale) {
+    return britishMale;
+  }
+
+  const british =
+    voices.find(
+      (voice) =>
+        voice.lang
+          .toLowerCase()
+          .startsWith(
+            'en-gb'
+          )
+    );
+
+  if (british) {
+    return british;
+  }
+
+  const englishMale =
+    voices.find(
+      (voice) => {
+        const name =
+          voice.name.toLowerCase();
+
+        return (
+          voice.lang
+            .toLowerCase()
+            .startsWith('en') &&
+          !name.includes(
+            'female'
+          ) &&
+          !name.includes(
+            'zira'
+          )
+        );
+      }
+    );
+
+  return (
+    englishMale ||
+    voices.find(
+      (voice) =>
+        voice.lang
+          .toLowerCase()
+          .startsWith('en')
+    )
+  );
+}
+
+/* =========================================================
+   SPEECH ENGINE
+   ========================================================= */
+
+function speakBrowser(
+  text: string,
+  settings: AssistantSettings,
+  requestId: string,
+  isActive: () => boolean,
+  onStart?: () => void,
+  onEnd?: () => void,
+  onLevel?: (level: number) => void
+) {
+  if (
+    typeof window ===
+      'undefined' ||
+    !('speechSynthesis' in window)
+  ) {
+    onEnd?.();
+    return;
+  }
+
+  const clean =
+    cleanSpeechText(text);
+
+  if (!clean) {
+    onEnd?.();
+    return;
+  }
+
+  window.speechSynthesis.cancel();
+
+  const utterance =
+    new SpeechSynthesisUtterance(
+      clean
+    );
+
+  const voice =
+    getBritishVoice(
+      settings.preferredVoice
+    );
+
+  if (voice) {
+    utterance.voice =
+      voice;
+  }
+
+  utterance.lang =
+    'en-GB';
+
+  utterance.rate =
+    Math.max(
+      0.8,
+      Math.min(
+        1.6,
+        settings.voiceRate ||
+          1.2
+      )
+    );
+
+  utterance.pitch =
+    Math.max(
+      0.7,
+      Math.min(
+        1.2,
+        settings.voicePitch ||
+          0.9
+      )
+    );
+
+  utterance.volume =
+    Math.max(
+      0,
+      Math.min(
+        1,
+        settings.voiceVolume ??
+          1
+      )
+    );
+
+  let levelTimer:
+    number | undefined;
+
+  utterance.onstart = () => {
+    if (!isActive()) {
+      window.speechSynthesis.cancel();
+      return;
+    }
+
+    onStart?.();
+
+    levelTimer =
+      window.setInterval(
+        () => {
+          if (
+            !isActive()
+          ) {
+            window.speechSynthesis.cancel();
+
+            if (
+              levelTimer
+            ) {
+              clearInterval(
+                levelTimer
+              );
+            }
+
+            return;
+          }
+
+          const level =
+            0.25 +
+            Math.random() *
+              0.55;
+
+          onLevel?.(
+            Math.min(
+              1,
+              level
+            )
+          );
+        },
+        80
+      );
+  };
+
+  utterance.onend = () => {
+    if (
+      levelTimer
+    ) {
+      clearInterval(
+        levelTimer
+      );
+    }
+
+    onLevel?.(0);
+
+    if (isActive()) {
+      onEnd?.();
+    }
+  };
+
+  utterance.onerror = () => {
+    if (
+      levelTimer
+    ) {
+      clearInterval(
+        levelTimer
+      );
+    }
+
+    onLevel?.(0);
+
+    if (isActive()) {
+      onEnd?.();
+    }
+  };
+
+  window.speechSynthesis.speak(
+    utterance
+  );
+
+  /*
+   * Chrome sometimes pauses long SpeechSynthesis
+   * utterances. Keep the queue alive.
+   */
+  window.setTimeout(() => {
+    if (
+      isActive() &&
+      window.speechSynthesis.paused
+    ) {
+      window.speechSynthesis.resume();
+    }
+  }, 250);
+}
+
+/* =========================================================
+   STOP BROWSER SPEECH
+   ========================================================= */
+
+function stopBrowserSpeech() {
+  if (
+    typeof window !==
+      'undefined' &&
+    'speechSynthesis' in window
+  ) {
+    try {
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.resume();
+    } catch {
+      // Ignore
+    }
+  }
+}
+
+/* =========================================================
+   PARSE GEMINI STREAM
+   ========================================================= */
+
+function extractTextFromGeminiChunk(
+  data: any
+): string {
+  let result = '';
+
+  const candidates =
+    data?.candidates;
+
+  if (
+    Array.isArray(
+      candidates
+    )
+  ) {
+    for (
+      const candidate of candidates
+    ) {
+      const parts =
+        candidate?.content?.parts;
+
+      if (
+        Array.isArray(parts)
+      ) {
+        for (
+          const part of parts
+        ) {
+          if (
+            typeof part?.text ===
+            'string'
+          ) {
+            result +=
+              part.text;
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+/* =========================================================
+   EXTRACT SOURCES
+   ========================================================= */
+
+function extractGeminiSources(
+  data: any
+): GeminiSource[] {
+  const sources: GeminiSource[] =
+    [];
+
+  const chunks =
+    data?.groundingMetadata
+      ?.groundingChunks;
+
+  if (
+    Array.isArray(chunks)
+  ) {
+    for (
+      const chunk of chunks
+    ) {
+      const web =
+        chunk?.web;
+
+      if (
+        web?.uri
+      ) {
+        sources.push({
+          title:
+            web.title ||
+            web.uri,
+
+          url:
+            web.uri,
+
+          domain:
+            (() => {
+              try {
+                return new URL(
+                  web.uri
+                ).hostname;
+              } catch {
+                return '';
+              }
+            })(),
+        });
+      }
+    }
+  }
+
+  return sources;
+}
+
+/* =========================================================
+   JARVIS APP
    ========================================================= */
 
 export default function App() {
   const [state, setState] =
-    useState<AssistantState>('idle');
+    useState<AssistantState>(
+      'idle'
+    );
 
   const [audioLevel, setAudioLevel] =
-    useState<number>(0);
+    useState(0);
 
   const [messages, setMessages] =
     useState<Message[]>([]);
 
   const [currentMessage, setCurrentMessage] =
-    useState<Message | null>(null);
+    useState<Message | null>(
+      null
+    );
 
   const [liveTranscript, setLiveTranscript] =
-    useState<string>('');
+    useState('');
 
   const [executionSteps, setExecutionSteps] =
-    useState<ExecutionStep[]>([]);
+    useState<ExecutionStep[]>(
+      []
+    );
 
   const [activeTool, setActiveTool] =
-    useState<ToolExecution | undefined>(
-      undefined
-    );
+    useState<
+      ToolExecution | undefined
+    >(undefined);
 
   const [tasks, setTasks] =
     useState<StarkTask[]>([]);
 
-  /* =========================================================
+  /* =======================================================
      BOOT
-     ========================================================= */
+     ======================================================= */
 
   const [isBooting, setIsBooting] =
-    useState<boolean>(() => {
-      if (typeof window !== 'undefined') {
+    useState(() => {
+      if (
+        typeof window !==
+        'undefined'
+      ) {
         return !sessionStorage.getItem(
           'jarvis_booted'
         );
@@ -128,36 +746,36 @@ export default function App() {
       return true;
     });
 
-  /* =========================================================
+  /* =======================================================
      SETTINGS
-     ========================================================= */
+     ======================================================= */
 
   const [settings, setSettings] =
-    useState<AssistantSettings>(() => {
-      if (typeof window !== 'undefined') {
-        const saved =
-          localStorage.getItem(
-            'jarvis_settings'
-          );
+    useState<AssistantSettings>(
+      () => {
+        try {
+          const saved =
+            localStorage.getItem(
+              'jarvis_settings'
+            );
 
-        if (saved) {
-          try {
+          if (saved) {
             return {
               ...DEFAULT_SETTINGS,
               ...JSON.parse(saved),
             };
-          } catch {
-            return DEFAULT_SETTINGS;
           }
+        } catch {
+          // Ignore
         }
+
+        return DEFAULT_SETTINGS;
       }
+    );
 
-      return DEFAULT_SETTINGS;
-    });
-
-  /* =========================================================
+  /* =======================================================
      TELEMETRY
-     ========================================================= */
+     ======================================================= */
 
   const [telemetry, setTelemetry] =
     useState<SystemTelemetry>({
@@ -168,15 +786,15 @@ export default function App() {
       batteryStatus:
         'FUSION COUPLING (99.8%)',
       networkStatus:
-        'STARK SATELLITE 10 Gbps',
+        'GEMINI DIRECT LINK',
       activeModel:
-        'gemini-2.5-flash',
+        GEMINI_MODEL,
       demoMode: false,
     });
 
-  /* =========================================================
+  /* =======================================================
      MODALS
-     ========================================================= */
+     ======================================================= */
 
   const [isHistoryOpen, setIsHistoryOpen] =
     useState(false);
@@ -196,82 +814,112 @@ export default function App() {
   const [isRunningAppsOpen, setIsRunningAppsOpen] =
     useState(false);
 
+  /* =======================================================
+     AUTOPLAY
+     ======================================================= */
+
   const [isAutoplayBlocked, setIsAutoplayBlocked] =
     useState(false);
 
-  /* =========================================================
+  /* =======================================================
      DESKTOP AGENT
-     ========================================================= */
+     ======================================================= */
 
   const [desktopAction, setDesktopAction] =
-    useState<DesktopActionDetail | null>(null);
+    useState<DesktopActionDetail | null>(
+      null
+    );
 
   const [desktopAgentState, setDesktopAgentState] =
     useState<DesktopAgentState>(() =>
       desktopAgent.getState()
     );
 
-  /* =========================================================
+  /* =======================================================
+     REQUEST REFS
+     ======================================================= */
+
+  const isProcessingRef =
+    useRef(false);
+
+  const activeRequestIdRef =
+    useRef<string | null>(
+      null
+    );
+
+  const activeAbortControllerRef =
+    useRef<AbortController | null>(
+      null
+    );
+
+  const lastPromptRef =
+    useRef('');
+
+  const lastPromptTimeRef =
+    useRef(0);
+
+  /* =======================================================
      AUDIO UNLOCK
-     ========================================================= */
+     ======================================================= */
 
   useEffect(() => {
-    const unsubscribe =
-      ttsService.subscribeAutoplayBlocked(
-        (blocked) => {
-          setIsAutoplayBlocked(blocked);
-        }
-      );
+    const unlock =
+      () => {
+        setIsAutoplayBlocked(
+          false
+        );
 
-    const unlockAudio = () => {
-      ttsService.unlockAudioContext();
-      setIsAutoplayBlocked(false);
-    };
+        if (
+          'speechSynthesis' in
+          window
+        ) {
+          try {
+            window.speechSynthesis.resume();
+          } catch {
+            // Ignore
+          }
+        }
+      };
 
     window.addEventListener(
       'click',
-      unlockAudio,
-      { passive: true }
+      unlock
     );
 
     window.addEventListener(
       'touchstart',
-      unlockAudio,
-      { passive: true }
+      unlock
     );
 
     window.addEventListener(
       'keydown',
-      unlockAudio,
-      { passive: true }
+      unlock
     );
 
     return () => {
-      unsubscribe();
-
       window.removeEventListener(
         'click',
-        unlockAudio
+        unlock
       );
 
       window.removeEventListener(
         'touchstart',
-        unlockAudio
+        unlock
       );
 
       window.removeEventListener(
         'keydown',
-        unlockAudio
+        unlock
       );
     };
   }, []);
 
-  /* =========================================================
-     DESKTOP AGENT EVENTS
-     ========================================================= */
+  /* =======================================================
+     DESKTOP AGENT
+     ======================================================= */
 
   useEffect(() => {
-    const unsubscribeState =
+    const unsubState =
       desktopAgent.subscribeState(
         (newState) => {
           setDesktopAgentState(
@@ -280,19 +928,24 @@ export default function App() {
         }
       );
 
-    const unsubscribeAction =
+    const unsubAction =
       desktopAgent.subscribeAction(
         (action) => {
-          setDesktopAction(action);
+          setDesktopAction(
+            action
+          );
 
           if (
-            action.stage === 'success' ||
-            action.stage === 'failed'
+            action.stage ===
+              'success' ||
+            action.stage ===
+              'failed'
           ) {
             setTimeout(() => {
               setDesktopAction(
                 (current) =>
-                  current?.id === action.id
+                  current?.id ===
+                  action.id
                     ? null
                     : current
               );
@@ -304,34 +957,38 @@ export default function App() {
     desktopAgent.checkHealth();
 
     return () => {
-      unsubscribeState();
-      unsubscribeAction();
+      unsubState();
+      unsubAction();
     };
   }, []);
 
-  /* =========================================================
-     DESKTOP TOOL DISPATCH
-     ========================================================= */
+  /* =======================================================
+     DESKTOP TOOL ACTIONS
+     ======================================================= */
 
-  const dispatchDesktopActionFromTool =
+  const dispatchDesktopAction =
     useCallback(
-      (tool: {
-        name: string;
-        args?: any;
-        result?: any;
-      }) => {
+      (
+        tool: {
+          name: string;
+          args?: any;
+          result?: any;
+        }
+      ) => {
         if (
           tool.name ===
           'open_desktop_application'
         ) {
           const appName =
-            tool.args?.applicationName ||
-            tool.result?.app ||
-            'Application';
+            tool.args
+              ?.applicationName ||
+            tool.result?.app;
 
-          desktopAgent.openApp(
-            appName
-          );
+          if (appName) {
+            desktopAgent.openApp(
+              appName
+            );
+          }
 
           return;
         }
@@ -341,14 +998,16 @@ export default function App() {
           'close_desktop_application'
         ) {
           const appName =
-            tool.args?.applicationName ||
-            tool.result?.app ||
-            'Application';
+            tool.args
+              ?.applicationName ||
+            tool.result?.app;
 
-          desktopAgent.closeApp(
-            appName,
-            true
-          );
+          if (appName) {
+            desktopAgent.closeApp(
+              appName,
+              true
+            );
+          }
 
           return;
         }
@@ -359,8 +1018,7 @@ export default function App() {
         ) {
           const url =
             tool.args?.url ||
-            tool.result?.url ||
-            '';
+            tool.result?.url;
 
           if (url) {
             desktopAgent.openWebsite(
@@ -372,97 +1030,79 @@ export default function App() {
       []
     );
 
-  /* =========================================================
-     SAVE SETTINGS
-     ========================================================= */
+  /* =======================================================
+     SETTINGS
+     ======================================================= */
 
   useEffect(() => {
     try {
       localStorage.setItem(
         'jarvis_settings',
-        JSON.stringify(settings)
+        JSON.stringify(
+          settings
+        )
       );
     } catch {
-      // Ignore localStorage errors
+      // Ignore
     }
 
     soundFx.setAmbientHum(
       settings.ambientHum &&
         state !== 'speaking'
     );
-  }, [settings, state]);
+  }, [
+    settings,
+    state,
+  ]);
 
-  /* =========================================================
-     LOAD INITIAL DATA
-     ========================================================= */
+  /* =======================================================
+     LOCAL TASKS
+     ======================================================= */
 
   useEffect(() => {
-    let cancelled = false;
+    try {
+      const saved =
+        localStorage.getItem(
+          'jarvis_tasks'
+        );
 
-    async function loadData() {
-      try {
-        const [
-          telemetryResponse,
-          tasksResponse,
-        ] = await Promise.all([
-          fetch(
-            apiUrl(
-              '/api/system/telemetry'
-            )
-          ),
-          fetch(
-            apiUrl('/api/tasks')
-          ),
-        ]);
-
-        if (
-          !cancelled &&
-          telemetryResponse.ok
-        ) {
-          const data =
-            await telemetryResponse.json();
-
-          setTelemetry(data);
-        }
-
-        if (
-          !cancelled &&
-          tasksResponse.ok
-        ) {
-          const data =
-            await tasksResponse.json();
-
-          setTasks(
-            data.tasks || []
-          );
-        }
-      } catch (error) {
-        console.warn(
-          'Initial API error:',
-          error
+      if (saved) {
+        setTasks(
+          JSON.parse(saved)
         );
       }
+    } catch {
+      // Ignore
     }
-
-    loadData();
-
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
-  /* =========================================================
-     BOOT HANDLERS
-     ========================================================= */
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        'jarvis_tasks',
+        JSON.stringify(tasks)
+      );
+    } catch {
+      // Ignore
+    }
+  }, [tasks]);
+
+  /* =======================================================
+     BOOT
+     ======================================================= */
 
   const handleBootComplete =
     () => {
       setIsBooting(false);
 
-      sessionStorage.setItem(
-        'jarvis_booted',
-        'true'
-      );
+      try {
+        sessionStorage.setItem(
+          'jarvis_booted',
+          'true'
+        );
+      } catch {
+        // Ignore
+      }
 
       soundFx.playReactorCharge(
         settings.soundEffects
@@ -471,51 +1111,19 @@ export default function App() {
 
   const handleReplayBoot =
     () => {
-      sessionStorage.removeItem(
-        'jarvis_booted'
-      );
-
       setIsBooting(true);
     };
 
-  /* =========================================================
-     REQUEST CONTROL
-     ========================================================= */
-
-  const isProcessingRef =
-    useRef(false);
-
-  const activePromptNormalizedRef =
-    useRef<string | null>(null);
-
-  const activeRequestIdRef =
-    useRef<string | null>(null);
-
-  const activeAbortControllerRef =
-    useRef<AbortController | null>(
-      null
-    );
-
-  const lastSubmittedTranscriptRef =
-    useRef('');
-
-  const lastSubmittedTimeRef =
-    useRef(0);
-
-  /* =========================================================
-     STOP EVERYTHING
-     ========================================================= */
+  /* =======================================================
+     STOP
+     ======================================================= */
 
   const handleStop =
     useCallback(() => {
-      if (
-        activeAbortControllerRef.current
-      ) {
-        activeAbortControllerRef.current.abort();
+      activeAbortControllerRef.current?.abort();
 
-        activeAbortControllerRef.current =
-          null;
-      }
+      activeAbortControllerRef.current =
+        null;
 
       activeRequestIdRef.current =
         null;
@@ -523,12 +1131,9 @@ export default function App() {
       isProcessingRef.current =
         false;
 
-      activePromptNormalizedRef.current =
-        null;
-
       stopSpeechRecognition();
 
-      stopJarvisSpeech();
+      stopBrowserSpeech();
 
       setState('idle');
 
@@ -536,7 +1141,9 @@ export default function App() {
 
       setLiveTranscript('');
 
-      setCurrentMessage(null);
+      setCurrentMessage(
+        null
+      );
 
       soundFx.playClick(
         settings.soundEffects
@@ -545,264 +1152,63 @@ export default function App() {
       settings.soundEffects,
     ]);
 
-  /* =========================================================
-     FALLBACK API
-     ========================================================= */
+  /* =======================================================
+     SPEAK RESPONSE
+     ======================================================= */
 
-  const runFallbackRequest =
-    async (
-      requestId: string,
-      assistantMessageId: string,
-      prompt: string,
-      abortController: AbortController
-    ): Promise<boolean> => {
-      try {
-        const response =
-          await fetch(
-            apiUrl(
-              '/api/assistant/interact'
-            ),
-            {
-              method: 'POST',
-
-              headers: {
-                'Content-Type':
-                  'application/json',
-              },
-
-              body: JSON.stringify({
-                requestId,
-
-                prompt,
-
-                history:
-                  messages
-                    .slice(-4)
-                    .map(
-                      (message) => ({
-                        role:
-                          message.role,
-                        content:
-                          message.content,
-                      })
-                    ),
-
-                style:
-                  settings.aiStyle,
-              }),
-
-              signal:
-                abortController.signal,
-            }
-          );
-
-        if (
-          !response.ok
-        ) {
-          return false;
-        }
-
-        if (
-          activeRequestIdRef.current !==
-          requestId
-        ) {
-          return false;
-        }
-
-        const data =
-          await response.json();
-
-        const reply =
-          data.reply ||
-          'Directive processed, sir.';
-
-        const message:
-          Message = {
-          id:
-            assistantMessageId,
-
-          role:
-            'assistant',
-
-          content:
-            reply,
-
-          sources:
-            data.sources,
-
-          toolExecution:
-            data.toolUsed
-              ? {
-                  name:
-                    data.toolUsed
-                      .name,
-
-                  displayName:
-                    data.toolUsed
-                      .name
-                      .replace(
-                        /_/g,
-                        ' '
-                      )
-                      .toUpperCase(),
-
-                  args:
-                    data.toolUsed
-                      .args,
-
-                  result:
-                    data.toolUsed
-                      .result,
-
-                  status:
-                    'success',
-                }
-              : undefined,
-
-          timestamp:
-            Date.now(),
-        };
-
-        setMessages(
-          (previous) => {
-            const index =
-              previous.findIndex(
-                (item) =>
-                  item.id ===
-                  assistantMessageId
-              );
-
-            if (index >= 0) {
-              const updated =
-                [...previous];
-
-              updated[index] =
-                message;
-
-              return updated;
-            }
-
-            return [
-              ...previous,
-              message,
-            ];
-          }
-        );
-
-        setCurrentMessage(
-          null
-        );
-
-        if (
-          data.toolUsed
-        ) {
-          setActiveTool({
-            name:
-              data.toolUsed
-                .name,
-
-            displayName:
-              data.toolUsed
-                .name
-                .replace(
-                  /_/g,
-                  ' '
-                )
-                .toUpperCase(),
-
-            args:
-              data.toolUsed
-                .args,
-
-            result:
-              data.toolUsed
-                .result,
-
-            status:
-              'success',
-          });
-
-          dispatchDesktopActionFromTool(
-            data.toolUsed
-          );
-        }
-
-        if (
-          settings.voiceEnabled
-        ) {
-          setState(
-            'speaking'
-          );
-
-          speakJarvis(
-            reply,
-            {
-              pitch:
-                settings.voicePitch,
-
-              rate:
-                settings.voiceRate,
-
-              volume:
-                settings.voiceVolume,
-
-              preferredVoice:
-                settings.preferredVoice,
-
-              onAudioLevel:
-                (level) => {
-                  if (
-                    activeRequestIdRef.current ===
-                    requestId
-                  ) {
-                    setAudioLevel(
-                      level
-                    );
-                  }
-                },
-
-              onEnd: () => {
-                if (
-                  activeRequestIdRef.current ===
-                  requestId
-                ) {
-                  setState(
-                    'idle'
-                  );
-
-                  setAudioLevel(
-                    0
-                  );
-                }
-              },
-            },
-            requestId
-          );
-        } else {
-          setState('idle');
-        }
-
-        return true;
-      } catch (error: any) {
-        if (
-          error?.name ===
-          'AbortError'
-        ) {
-          return false;
-        }
-
-        console.warn(
-          'Fallback API error:',
-          error
-        );
-
-        return false;
+  const speakResponse = useCallback(
+    (
+      text: string,
+      requestId: string
+    ) => {
+      if (
+        !settings.voiceEnabled
+      ) {
+        setState('idle');
+        return;
       }
-    };
 
-  /* =========================================================
-     PROCESS DIRECTIVE
-     ========================================================= */
+      setState(
+        'speaking'
+      );
+
+      speakBrowser(
+        text,
+        settings,
+        requestId,
+        () =>
+          activeRequestIdRef.current ===
+          requestId,
+        () => {
+          if (
+            activeRequestIdRef.current ===
+            requestId
+          ) {
+            setState(
+              'idle'
+            );
+
+            setAudioLevel(0);
+          }
+        },
+        (level) => {
+          if (
+            activeRequestIdRef.current ===
+            requestId
+          ) {
+            setAudioLevel(
+              level
+            );
+          }
+        }
+      );
+    },
+    [settings]
+  );
+
+  /* =======================================================
+     MAIN GEMINI STREAM
+     ======================================================= */
 
   const processDirective =
     async (
@@ -818,128 +1224,105 @@ export default function App() {
       const normalized =
         cleanPrompt
           .toLowerCase()
-          .replace(/\s+/g, ' ')
-          .replace(/[.,!?]+$/, '');
+          .replace(
+            /\s+/g,
+            ' '
+          )
+          .replace(
+            /[.,!?]+$/,
+            ''
+          );
 
       const now =
         Date.now();
 
-      /* -----------------------------------------------------
+      /* ---------------------------------------------------
          DUPLICATE PROTECTION
-         ----------------------------------------------------- */
+         --------------------------------------------------- */
 
       if (
         normalized ===
-          lastSubmittedTranscriptRef.current &&
+          lastPromptRef.current &&
         now -
-          lastSubmittedTimeRef.current <
+          lastPromptTimeRef.current <
           3000
       ) {
         console.log(
-          '[JARVIS] Duplicate directive ignored.'
+          '[JARVIS] Duplicate request ignored.'
         );
 
         return;
       }
 
-      /* -----------------------------------------------------
-         SAME ACTIVE REQUEST
-         ----------------------------------------------------- */
+      lastPromptRef.current =
+        normalized;
 
-      if (
-        isProcessingRef.current &&
-        normalized ===
-          activePromptNormalizedRef.current
-      ) {
-        console.log(
-          '[JARVIS] Active duplicate ignored.'
-        );
+      lastPromptTimeRef.current =
+        now;
 
-        return;
-      }
-
-      /* -----------------------------------------------------
-         INTERRUPT OLD REQUEST
-         ----------------------------------------------------- */
+      /* ---------------------------------------------------
+         STOP OLD REQUEST
+         --------------------------------------------------- */
 
       if (
         isProcessingRef.current
       ) {
-        if (
-          activeAbortControllerRef.current
-        ) {
-          activeAbortControllerRef.current.abort();
+        activeAbortControllerRef.current?.abort();
 
-          activeAbortControllerRef.current =
-            null;
-        }
-
-        stopJarvisSpeech();
+        stopBrowserSpeech();
 
         stopSpeechRecognition();
       }
 
-      /* -----------------------------------------------------
-         LOCK REQUEST
-         ----------------------------------------------------- */
-
-      lastSubmittedTranscriptRef.current =
-        normalized;
-
-      lastSubmittedTimeRef.current =
-        now;
-
-      activePromptNormalizedRef.current =
-        normalized;
-
       isProcessingRef.current =
         true;
-
-      /* -----------------------------------------------------
-         REQUEST ID
-         ----------------------------------------------------- */
 
       const requestId =
         typeof crypto !==
           'undefined' &&
         crypto.randomUUID
           ? crypto.randomUUID()
-          : `req-${Date.now()}-${Math.random()
+          : `jarvis-${Date.now()}-${Math.random()
               .toString(36)
-              .slice(2, 10)}`;
+              .slice(2)}`;
 
       activeRequestIdRef.current =
         requestId;
 
-      const abortController =
+      const controller =
         new AbortController();
 
       activeAbortControllerRef.current =
-        abortController;
+        controller;
 
-      console.log(
-        `[JARVIS] REQUEST CREATED: ${requestId}`
-      );
+      /* ---------------------------------------------------
+         GEMINI KEY
+         --------------------------------------------------- */
 
-      /* -----------------------------------------------------
-         STOP PREVIOUS AUDIO
-         ----------------------------------------------------- */
+      const apiKey =
+        getStoredGeminiKey() ||
+        requestGeminiKey();
 
-      stopJarvisSpeech();
+      if (!apiKey) {
+        isProcessingRef.current =
+          false;
 
-      stopSpeechRecognition();
+        activeRequestIdRef.current =
+          null;
 
-      /* -----------------------------------------------------
+        setState('idle');
+
+        return;
+      }
+
+      /* ---------------------------------------------------
          USER MESSAGE
-         ----------------------------------------------------- */
-
-      const userMessageId =
-        `user-${requestId}`;
+         --------------------------------------------------- */
 
       const userMessage:
         Message = {
         id:
-          userMessageId,
+          `user-${requestId}`,
 
         role:
           'user',
@@ -952,22 +1335,10 @@ export default function App() {
       };
 
       setMessages(
-        (previous) => {
-          if (
-            previous.some(
-              (item) =>
-                item.id ===
-                userMessageId
-            )
-          ) {
-            return previous;
-          }
-
-          return [
-            ...previous,
-            userMessage,
-          ];
-        }
+        (previous) => [
+          ...previous,
+          userMessage,
+        ]
       );
 
       setCurrentMessage(
@@ -986,7 +1357,7 @@ export default function App() {
             'listening',
 
           label:
-            'Captured Voice Input',
+            'Voice directive captured',
 
           timestamp:
             Date.now(),
@@ -997,7 +1368,7 @@ export default function App() {
             'understanding',
 
           label:
-            'Semantic Directive Classification',
+            'Processing semantic directive',
 
           timestamp:
             Date.now(),
@@ -1008,7 +1379,7 @@ export default function App() {
             'thinking',
 
           label:
-            'Accessing Neural AI Stream',
+            'Connecting directly to Gemini',
 
           timestamp:
             Date.now(),
@@ -1021,199 +1392,159 @@ export default function App() {
         settings.soundEffects
       );
 
-      /* -----------------------------------------------------
-         RESPONSE DATA
-         ----------------------------------------------------- */
-
       const assistantMessageId =
-        `asst-${requestId}`;
+        `assistant-${requestId}`;
 
-      let accumulatedText =
+      let fullResponse =
         '';
 
-      let toolUsedData:
-        | ToolExecution
-        | undefined;
+      let sources:
+        GeminiSource[] =
+        [];
 
-      let sourcesData:
-        | any[]
-        | undefined;
-
-      let firstTokenReceived =
-        false;
-
-      const aiStartTime =
+      const responseStart =
         performance.now();
 
-      /* -----------------------------------------------------
-         START TTS STREAM
-         ----------------------------------------------------- */
-
-      if (
-        settings.voiceEnabled
-      ) {
-        streamingSpeaker.start(
-          {
-            pitch:
-              settings.voicePitch,
-
-            rate:
-              settings.voiceRate,
-
-            volume:
-              settings.voiceVolume,
-
-            preferredVoice:
-              settings.preferredVoice,
-
-            onStart: () => {
-              if (
-                activeRequestIdRef.current ===
-                requestId
-              ) {
-                setState(
-                  'speaking'
-                );
-              }
-            },
-
-            onAudioLevel:
-              (level) => {
-                if (
-                  activeRequestIdRef.current ===
-                  requestId
-                ) {
-                  setAudioLevel(
-                    level
-                  );
-                }
-              },
-
-            onInterrupted:
-              () => {
-                if (
-                  activeRequestIdRef.current ===
-                  requestId
-                ) {
-                  setState(
-                    'interrupted'
-                  );
-
-                  setAudioLevel(
-                    0
-                  );
-                }
-              },
-
-            onEnd: () => {
-              if (
-                activeRequestIdRef.current ===
-                requestId
-              ) {
-                setState(
-                  'idle'
-                );
-
-                setAudioLevel(
-                  0
-                );
-              }
-            },
-          },
-
-          aiStartTime,
-
-          requestId
-        );
-      }
-
-      /* =====================================================
-         MAIN REQUEST
-         ===================================================== */
+      /* ===================================================
+         REQUEST
+         =================================================== */
 
       try {
         const response =
           await fetch(
-            apiUrl(
-              '/api/assistant/stream'
-            ),
+            GEMINI_ENDPOINT,
             {
-              method: 'POST',
+              method:
+                'POST',
 
               headers: {
                 'Content-Type':
                   'application/json',
+
+                'x-goog-api-key':
+                  apiKey,
               },
 
               body: JSON.stringify({
-                requestId,
+                contents:
+                  buildGeminiContents(
+                    messages,
+                    cleanPrompt
+                  ),
 
-                prompt:
-                  cleanPrompt,
+                systemInstruction: {
+                  parts: [
+                    {
+                      text:
+                        getSystemInstruction(
+                          settings.aiStyle
+                        ),
+                    },
+                  ],
+                },
 
-                history:
-                  messages
-                    .slice(
-                      -(
-                        settings.contextMemory ||
-                        10
-                      )
-                    )
-                    .map(
-                      (message) => ({
-                        role:
-                          message.role,
+                tools: [
+                  {
+                    google_search: {},
+                  },
+                ],
 
-                        content:
-                          message.content,
-                      })
-                    ),
+                generationConfig: {
+                  temperature:
+                    0.3,
 
-                style:
-                  settings.aiStyle,
+                  maxOutputTokens:
+                    2048,
+                },
               }),
 
               signal:
-                abortController.signal,
+                controller.signal,
             }
           );
 
-        /* ---------------------------------------------------
-           RESPONSE VALIDATION
-           --------------------------------------------------- */
+        /* -------------------------------------------------
+           API ERROR
+           ------------------------------------------------- */
 
-        if (
-          !response.ok ||
-          !response.body
-        ) {
-          let errorText =
-            '';
+        if (!response.ok) {
+          let errorMessage =
+            `Gemini API returned HTTP ${response.status}.`;
 
           try {
             const errorData =
               await response.json();
 
-            errorText =
-              errorData?.error ||
-              errorData?.message ||
-              '';
+            const apiError =
+              errorData?.error
+                ?.message;
+
+            if (apiError) {
+              errorMessage =
+                apiError;
+            }
           } catch {
-            // Not JSON
+            // Ignore
+          }
+
+          if (
+            response.status ===
+            400
+          ) {
+            errorMessage =
+              `Gemini rejected the request. ${errorMessage}`;
+          }
+
+          if (
+            response.status ===
+            401 ||
+            response.status ===
+            403
+          ) {
+            try {
+              localStorage.removeItem(
+                'jarvis_gemini_api_key'
+              );
+            } catch {
+              // Ignore
+            }
+
+            errorMessage =
+              'Gemini API key was rejected. Please enter a valid Gemini API key on the next request.';
           }
 
           throw new Error(
-            errorText ||
-              `Backend returned HTTP ${response.status}`
+            errorMessage
           );
         }
 
-        console.log(
-          `[JARVIS] STREAM CONNECTED: ${requestId}`
+        if (
+          !response.body
+        ) {
+          throw new Error(
+            'Gemini returned an empty response stream.'
+          );
+        }
+
+        setExecutionSteps(
+          (previous) => [
+            ...previous,
+            {
+              stage:
+                'thinking',
+
+              label:
+                'Gemini connection established',
+
+              timestamp:
+                Date.now(),
+            },
+          ]
         );
 
-        /* ---------------------------------------------------
+        /* -------------------------------------------------
            SSE READER
-           --------------------------------------------------- */
+           ------------------------------------------------- */
 
         const reader =
           response.body.getReader();
@@ -1223,6 +1554,9 @@ export default function App() {
 
         let buffer =
           '';
+
+        let firstToken =
+          false;
 
         while (true) {
           const {
@@ -1236,10 +1570,10 @@ export default function App() {
           }
 
           if (
+            controller.signal
+              .aborted ||
             activeRequestIdRef.current !==
-              requestId ||
-            abortController.signal
-              .aborted
+              requestId
           ) {
             try {
               await reader.cancel();
@@ -1254,347 +1588,157 @@ export default function App() {
             decoder.decode(
               value,
               {
-                stream: true,
+                stream:
+                  true,
               }
             );
 
-          const blocks =
+          const lines =
             buffer.split(
-              '\n\n'
+              '\n'
             );
 
           buffer =
-            blocks.pop() ||
+            lines.pop() ||
             '';
 
           for (
-            const block of blocks
+            const line of lines
           ) {
-            const lines =
-              block.split('\n');
+            const trimmed =
+              line.trim();
 
-            for (
-              const line of lines
+            if (
+              !trimmed.startsWith(
+                'data:'
+              )
             ) {
-              if (
-                !line.startsWith(
-                  'data: '
-                )
-              ) {
-                continue;
-              }
+              continue;
+            }
 
-              const payload =
-                line
-                  .slice(6)
-                  .trim();
+            const jsonText =
+              trimmed
+                .slice(5)
+                .trim();
 
-              if (
-                !payload
-              ) {
-                continue;
-              }
+            if (
+              !jsonText ||
+              jsonText ===
+                '[DONE]'
+            ) {
+              continue;
+            }
 
-              let event: any;
+            let chunk:
+              any;
 
-              try {
-                event =
-                  JSON.parse(
-                    payload
-                  );
-              } catch {
-                console.warn(
-                  '[JARVIS] Invalid SSE event'
+            try {
+              chunk =
+                JSON.parse(
+                  jsonText
                 );
+            } catch {
+              continue;
+            }
 
-                continue;
-              }
+            const chunkText =
+              extractTextFromGeminiChunk(
+                chunk
+              );
 
-              /* ---------------------------------------------
-                 TOKEN
-                 --------------------------------------------- */
+            const chunkSources =
+              extractGeminiSources(
+                chunk
+              );
 
-              if (
-                event.type ===
-                  'token' &&
-                typeof event.delta ===
-                  'string'
-              ) {
-                accumulatedText +=
-                  event.delta;
-
-                if (
-                  !firstTokenReceived
-                ) {
-                  firstTokenReceived =
-                    true;
-
-                  const latency =
-                    Math.max(
-                      0.05,
-                      (
-                        performance.now() -
-                        aiStartTime
-                      ) /
-                        1000
-                    );
-
-                  ttsService.setMetrics(
-                    {
-                      aiFirstTokenLatency:
-                        latency,
-
-                      aiResponseTime:
-                        latency,
-                    }
-                  );
-
-                  setState(
-                    'speaking'
-                  );
-
-                  console.log(
-                    `[JARVIS] FIRST TOKEN: ${requestId}`
-                  );
-                }
-
-                const progressiveMessage:
-                  Message = {
-                  id:
-                    assistantMessageId,
-
-                  role:
-                    'assistant',
-
-                  content:
-                    accumulatedText,
-
-                  sources:
-                    sourcesData,
-
-                  toolExecution:
-                    toolUsedData,
-
-                  timestamp:
-                    Date.now(),
-                };
-
-                setCurrentMessage(
-                  progressiveMessage
-                );
-
-                if (
-                  settings.voiceEnabled
-                ) {
-                  streamingSpeaker.pushToken(
-                    event.delta
-                  );
-                }
-              }
-
-              /* ---------------------------------------------
-                 TOOL
-                 --------------------------------------------- */
-
-              else if (
-                event.type ===
-                  'tool' &&
-                event.tool
-              ) {
-                toolUsedData = {
-                  name:
-                    event.tool.name,
-
-                  displayName:
-                    event.tool.name
-                      .replace(
-                        /_/g,
-                        ' '
-                      )
-                      .toUpperCase(),
-
-                  args:
-                    event.tool.args,
-
-                  result:
-                    event.tool.result,
-
-                  status:
-                    'success',
-                };
-
-                setActiveTool(
-                  toolUsedData
-                );
-
-                dispatchDesktopActionFromTool(
-                  event.tool
-                );
-
-                if (
-                  event.tool.name ===
-                  'manage_stark_task'
-                ) {
-                  fetch(
-                    apiUrl(
-                      '/api/tasks'
-                    )
+            if (
+              chunkSources.length
+            ) {
+              sources = [
+                ...sources,
+                ...chunkSources,
+              ].filter(
+                (
+                  source,
+                  index,
+                  array
+                ) =>
+                  index ===
+                  array.findIndex(
+                    (
+                      item
+                    ) =>
+                      item.url ===
+                      source.url
                   )
-                    .then(
-                      (result) =>
-                        result.json()
-                    )
-                    .then(
-                      (data) => {
-                        setTasks(
-                          data.tasks ||
-                            []
-                        );
-                      }
-                    )
-                    .catch(
-                      () => {}
-                    );
-                }
-              }
+              );
+            }
 
-              /* ---------------------------------------------
-                 EXECUTION STEP
-                 --------------------------------------------- */
+            if (
+              chunkText
+            ) {
+              fullResponse +=
+                chunkText;
 
-              else if (
-                event.type ===
-                  'step' &&
-                event.step
+              if (
+                !firstToken
               ) {
-                setExecutionSteps(
-                  (previous) => [
-                    ...previous,
-                    {
-                      stage:
-                        'thinking',
+                firstToken =
+                  true;
 
-                      label:
-                        event.step,
+                const latency =
+                  (
+                    performance.now() -
+                    responseStart
+                  ) / 1000;
 
-                      timestamp:
-                        Date.now(),
-                    },
-                  ]
+                console.log(
+                  `[JARVIS] First token in ${latency.toFixed(
+                    2
+                  )}s`
+                );
+
+                setState(
+                  'speaking'
                 );
               }
 
-              /* ---------------------------------------------
-                 DONE
-                 --------------------------------------------- */
+              const liveMessage:
+                Message = {
+                id:
+                  assistantMessageId,
 
-              else if (
-                event.type ===
-                  'done'
-              ) {
-                if (
-                  event.reply &&
-                  !accumulatedText
-                ) {
-                  accumulatedText =
-                    event.reply;
-                }
+                role:
+                  'assistant',
 
-                if (
-                  Array.isArray(
-                    event.sources
-                  )
-                ) {
-                  sourcesData =
-                    event.sources;
-                }
+                content:
+                  fullResponse,
 
-                if (
-                  event.toolUsed &&
-                  !toolUsedData
-                ) {
-                  toolUsedData = {
-                    name:
-                      event.toolUsed
-                        .name,
+                sources:
+                  sources,
 
-                    displayName:
-                      event.toolUsed
-                        .name
-                        .replace(
-                          /_/g,
-                          ' '
-                        )
-                        .toUpperCase(),
+                timestamp:
+                  Date.now(),
+              };
 
-                    args:
-                      event.toolUsed
-                        .args,
-
-                    result:
-                      event.toolUsed
-                        .result,
-
-                    status:
-                      'success',
-                  };
-
-                  setActiveTool(
-                    toolUsedData
-                  );
-
-                  dispatchDesktopActionFromTool(
-                    event.toolUsed
-                  );
-                }
-              }
-
-              /* ---------------------------------------------
-                 SERVER ERROR
-                 --------------------------------------------- */
-
-              else if (
-                event.type ===
-                  'error'
-              ) {
-                throw new Error(
-                  event.error ||
-                    event.message ||
-                    'AI stream error'
-                );
-              }
+              setCurrentMessage(
+                liveMessage
+              );
             }
           }
         }
 
-        /* ---------------------------------------------------
-           VERIFY REQUEST
-           --------------------------------------------------- */
+        /* -------------------------------------------------
+           FINAL RESPONSE
+           ------------------------------------------------- */
 
         if (
-          activeRequestIdRef.current !==
-            requestId ||
-          abortController.signal
-            .aborted
+          !fullResponse.trim()
         ) {
-          return;
+          throw new Error(
+            'Gemini returned no text.'
+          );
         }
-
-        /* ---------------------------------------------------
-           FINISH TTS
-           --------------------------------------------------- */
-
-        if (
-          settings.voiceEnabled
-        ) {
-          streamingSpeaker.finishStream();
-        } else {
-          setState('idle');
-        }
-
-        /* ---------------------------------------------------
-           FINAL ASSISTANT MESSAGE
-           --------------------------------------------------- */
 
         const finalMessage:
           Message = {
@@ -1605,43 +1749,20 @@ export default function App() {
             'assistant',
 
           content:
-            accumulatedText ||
-            'Directive executed, sir.',
+            fullResponse.trim(),
 
           sources:
-            sourcesData,
-
-          toolExecution:
-            toolUsedData,
+            sources,
 
           timestamp:
             Date.now(),
         };
 
         setMessages(
-          (previous) => {
-            const index =
-              previous.findIndex(
-                (message) =>
-                  message.id ===
-                  assistantMessageId
-              );
-
-            if (index >= 0) {
-              const updated =
-                [...previous];
-
-              updated[index] =
-                finalMessage;
-
-              return updated;
-            }
-
-            return [
-              ...previous,
-              finalMessage,
-            ];
-          }
+          (previous) => [
+            ...previous,
+            finalMessage,
+          ]
         );
 
         setCurrentMessage(
@@ -1656,7 +1777,7 @@ export default function App() {
                 'completed',
 
               label:
-                'Protocol Completed',
+                'Response received',
 
               timestamp:
                 Date.now(),
@@ -1664,127 +1785,97 @@ export default function App() {
           ]
         );
 
+        if (
+          settings.voiceEnabled
+        ) {
+          speakResponse(
+            fullResponse,
+            requestId
+          );
+        } else {
+          setState('idle');
+        }
+
         console.log(
-          `[JARVIS] REQUEST COMPLETED: ${requestId}`
+          `[JARVIS] Request completed: ${requestId}`
         );
       }
 
-      /* =====================================================
-         CATCH
-         ===================================================== */
+      /* ===================================================
+         ERROR
+         =================================================== */
 
       catch (error: any) {
         if (
           error?.name ===
-            'AbortError' ||
-          activeRequestIdRef.current !==
-            requestId
+          'AbortError'
         ) {
-          console.log(
-            `[JARVIS] REQUEST ABORTED: ${requestId}`
-          );
-
           return;
         }
 
-        console.warn(
-          '[JARVIS] STREAM ERROR:',
+        if (
+          activeRequestIdRef.current !==
+          requestId
+        ) {
+          return;
+        }
+
+        console.error(
+          '[JARVIS] Gemini error:',
           error
         );
 
-        /* ---------------------------------------------------
-           FALLBACK
-           --------------------------------------------------- */
+        stopBrowserSpeech();
 
-        const fallbackSucceeded =
-          await runFallbackRequest(
-            requestId,
+        setAudioLevel(0);
+
+        setState('error');
+
+        soundFx.playError(
+          settings.soundEffects
+        );
+
+        const message:
+          Message = {
+          id:
             assistantMessageId,
-            cleanPrompt,
-            abortController
-          );
 
-        if (
-          fallbackSucceeded
-        ) {
-          return;
-        }
+          role:
+            'assistant',
 
-        /* ---------------------------------------------------
-           ERROR MESSAGE
-           --------------------------------------------------- */
+          content:
+            `I'm unable to reach the Gemini AI service. ${error?.message || 'Please check your API key and internet connection.'}`,
 
-        if (
-          activeRequestIdRef.current ===
-          requestId
-        ) {
-          setState('error');
+          timestamp:
+            Date.now(),
+        };
 
-          soundFx.playError(
-            settings.soundEffects
-          );
+        setMessages(
+          (previous) => [
+            ...previous,
+            message,
+          ]
+        );
 
-          const errorMessage:
-            Message = {
-            id:
-              assistantMessageId,
+        setCurrentMessage(
+          null
+        );
 
-            role:
-              'assistant',
-
-            content:
-              'My apologies, sir. The J.A.R.V.I.S. backend is currently unavailable. Please verify the Render backend URL and server status.',
-
-            timestamp:
-              Date.now(),
-          };
-
-          setMessages(
-            (previous) => {
-              const index =
-                previous.findIndex(
-                  (message) =>
-                    message.id ===
-                    assistantMessageId
-                );
-
-              if (index >= 0) {
-                const updated =
-                  [...previous];
-
-                updated[index] =
-                  errorMessage;
-
-                return updated;
-              }
-
-              return [
-                ...previous,
-                errorMessage,
-              ];
-            }
-          );
-
-          setCurrentMessage(
-            null
-          );
-
-          setTimeout(() => {
-            if (
-              activeRequestIdRef.current ===
-              requestId
-            ) {
-              setState(
-                'idle'
-              );
-            }
-          }, 1500);
-        }
+        setTimeout(() => {
+          if (
+            activeRequestIdRef.current ===
+            requestId
+          ) {
+            setState(
+              'idle'
+            );
+          }
+        }, 1800);
       }
 
-      /* =====================================================
+      /* ===================================================
          FINALLY
-         ===================================================== */
+         =================================================== */
 
       finally {
         if (
@@ -1794,44 +1885,34 @@ export default function App() {
           isProcessingRef.current =
             false;
 
-          activePromptNormalizedRef.current =
+          activeRequestIdRef.current =
             null;
 
-          if (
-            activeAbortControllerRef.current ===
-            abortController
-          ) {
-            activeAbortControllerRef.current =
-              null;
-          }
+          activeAbortControllerRef.current =
+            null;
+
+          setAudioLevel(
+            0
+          );
         }
       }
     };
 
-  /* =========================================================
+  /* =======================================================
      MICROPHONE
-     ========================================================= */
+     ======================================================= */
 
   const handleActivateMic =
     () => {
-      ttsService.unlockAudioContext();
-
       if (
-        state === 'speaking' ||
-        ttsService
-          .getMetrics()
-          .voiceActive
+        state === 'speaking'
       ) {
-        stopJarvisSpeech();
-
-        setState(
-          'interrupted'
-        );
+        stopBrowserSpeech();
 
         setAudioLevel(0);
 
-        soundFx.playClick(
-          settings.soundEffects
+        setState(
+          'interrupted'
         );
 
         armMicrophone();
@@ -1842,23 +1923,19 @@ export default function App() {
       armMicrophone();
     };
 
-  /* =========================================================
-     ARM MICROPHONE
-     ========================================================= */
-
   const armMicrophone =
     () => {
-      stopJarvisSpeech();
+      stopBrowserSpeech();
 
       stopSpeechRecognition();
-
-      ttsService.unlockAudioContext();
 
       soundFx.playReactorCharge(
         settings.soundEffects
       );
 
-      setState('listening');
+      setState(
+        'listening'
+      );
 
       setLiveTranscript('');
 
@@ -1873,29 +1950,29 @@ export default function App() {
           transcript,
           isFinal
         ) => {
+          const text =
+            transcript.trim();
+
+          if (!text) {
+            return;
+          }
+
           if (!isFinal) {
             setLiveTranscript(
-              transcript
+              text
             );
 
             return;
           }
 
-          const finalText =
-            transcript.trim();
-
-          if (!finalText) {
-            return;
-          }
-
           setLiveTranscript(
-            finalText
+            text
           );
 
           stopSpeechRecognition();
 
           processDirective(
-            finalText
+            text
           );
         },
 
@@ -1909,42 +1986,37 @@ export default function App() {
         onError:
           (error) => {
             console.warn(
-              'Speech recognition error:',
+              'Speech recognition:',
               error
             );
 
-            if (
-              !isProcessingRef.current
-            ) {
-              setState(
-                'error'
-              );
+            setState(
+              'error'
+            );
 
-              soundFx.playError(
-                settings.soundEffects
-              );
+            setAudioLevel(0);
 
-              setTimeout(() => {
-                if (
-                  !isProcessingRef.current
-                ) {
-                  setState(
-                    'idle'
-                  );
-                }
-              }, 1800);
-            }
+            soundFx.playError(
+              settings.soundEffects
+            );
+
+            setTimeout(
+              () =>
+                setState(
+                  'idle'
+                ),
+              1500
+            );
           },
 
         onEnd: () => {
-          /*
-           * Final speech is submitted only
-           * through onResult(..., true).
-           */
-
           if (
             !isProcessingRef.current
           ) {
+            setAudioLevel(
+              0
+            );
+
             setState(
               (current) =>
                 current ===
@@ -1952,20 +2024,20 @@ export default function App() {
                   ? 'idle'
                   : current
             );
-
-            setAudioLevel(0);
           }
         },
       });
     };
 
-  /* =========================================================
-     SPACEBAR
-     ========================================================= */
+  /* =======================================================
+     KEYBOARD
+     ======================================================= */
 
   useEffect(() => {
     const handleKeyDown =
-      (event: KeyboardEvent) => {
+      (
+        event: KeyboardEvent
+      ) => {
         if (
           event.code !==
           'Space'
@@ -1994,8 +2066,10 @@ export default function App() {
         ) {
           handleActivateMic();
         } else if (
-          state === 'listening' ||
-          state === 'speaking'
+          state ===
+            'listening' ||
+          state ===
+            'speaking'
         ) {
           handleStop();
         }
@@ -2014,13 +2088,12 @@ export default function App() {
     };
   }, [
     state,
-    settings.soundEffects,
     handleStop,
   ]);
 
-  /* =========================================================
-     ADD TASK
-     ========================================================= */
+  /* =======================================================
+     TASKS
+     ======================================================= */
 
   const handleAddTask =
     async (taskData: {
@@ -2031,142 +2104,83 @@ export default function App() {
         | 'medium'
         | 'high';
     }) => {
-      try {
-        const response =
-          await fetch(
-            apiUrl('/api/tasks'),
-            {
-              method: 'POST',
+      const task: StarkTask =
+        {
+          id:
+            `task-${Date.now()}`,
 
-              headers: {
-                'Content-Type':
-                  'application/json',
-              },
+          title:
+            taskData.title,
 
-              body:
-                JSON.stringify(
-                  taskData
-                ),
-            }
-          );
+          due:
+            taskData.due ||
+            'Upcoming',
 
-        if (
-          response.ok
-        ) {
-          const data =
-            await response.json();
+          priority:
+            taskData.priority,
 
-          setTasks(
-            data.tasks || []
-          );
+          completed:
+            false,
 
-          soundFx.playClick(
-            settings.soundEffects
-          );
-        }
-      } catch (error) {
-        console.warn(
-          'Add task error:',
-          error
-        );
-      }
+          createdAt:
+            Date.now(),
+        };
+
+      setTasks(
+        (previous) => [
+          task,
+          ...previous,
+        ]
+      );
+
+      soundFx.playClick(
+        settings.soundEffects
+      );
     };
-
-  /* =========================================================
-     TOGGLE TASK
-     ========================================================= */
 
   const handleToggleTask =
     async (
       id: string,
       completed: boolean
     ) => {
-      try {
-        const response =
-          await fetch(
-            apiUrl(
-              `/api/tasks/${id}`
-            ),
-            {
-              method: 'PATCH',
+      setTasks(
+        (previous) =>
+          previous.map(
+            (task) =>
+              task.id === id
+                ? {
+                    ...task,
+                    completed,
+                  }
+                : task
+          )
+      );
 
-              headers: {
-                'Content-Type':
-                  'application/json',
-              },
-
-              body:
-                JSON.stringify({
-                  completed,
-                }),
-            }
-          );
-
-        if (
-          response.ok
-        ) {
-          const data =
-            await response.json();
-
-          setTasks(
-            data.tasks || []
-          );
-
-          soundFx.playClick(
-            settings.soundEffects
-          );
-        }
-      } catch (error) {
-        console.warn(
-          'Toggle task error:',
-          error
-        );
-      }
+      soundFx.playClick(
+        settings.soundEffects
+      );
     };
-
-  /* =========================================================
-     DELETE TASK
-     ========================================================= */
 
   const handleDeleteTask =
-    async (id: string) => {
-      try {
-        const response =
-          await fetch(
-            apiUrl(
-              `/api/tasks/${id}`
-            ),
-            {
-              method:
-                'DELETE',
-            }
-          );
+    async (
+      id: string
+    ) => {
+      setTasks(
+        (previous) =>
+          previous.filter(
+            (task) =>
+              task.id !== id
+          )
+      );
 
-        if (
-          response.ok
-        ) {
-          const data =
-            await response.json();
-
-          setTasks(
-            data.tasks || []
-          );
-
-          soundFx.playClick(
-            settings.soundEffects
-          );
-        }
-      } catch (error) {
-        console.warn(
-          'Delete task error:',
-          error
-        );
-      }
+      soundFx.playClick(
+        settings.soundEffects
+      );
     };
 
-  /* =========================================================
+  /* =======================================================
      CLEAR HISTORY
-     ========================================================= */
+     ======================================================= */
 
   const handleClearHistory =
     () => {
@@ -2189,14 +2203,16 @@ export default function App() {
       );
     };
 
-  /* =========================================================
+  /* =======================================================
      RENDER
-     ========================================================= */
+     ======================================================= */
 
   return (
     <div className="min-h-screen w-full flex flex-col justify-between relative overflow-x-hidden bg-[#020408] text-cyan-400 select-none scanlines">
 
-      {/* BOOT */}
+      {/* ===================================================
+          BOOT
+          =================================================== */}
 
       {isBooting && (
         <BootSequence
@@ -2206,7 +2222,9 @@ export default function App() {
         />
       )}
 
-      {/* BACKGROUND */}
+      {/* ===================================================
+          BACKGROUND
+          =================================================== */}
 
       <div className="fixed inset-0 pointer-events-none z-0">
 
@@ -2216,7 +2234,9 @@ export default function App() {
 
       </div>
 
-      {/* TOP BAR */}
+      {/* ===================================================
+          TOP BAR
+          =================================================== */}
 
       <JarvisTopBar
         onOpenSettings={() =>
@@ -2226,13 +2246,13 @@ export default function App() {
         }
       />
 
-      {/* MAIN HUD */}
+      {/* ===================================================
+          MAIN HUD
+          =================================================== */}
 
       <div className="flex-1 w-full max-w-[1560px] mx-auto p-2 sm:p-3.5 relative z-10">
 
         <div className="relative w-full h-full p-2 sm:p-3 rounded-lg border border-cyan-500/20 bg-[#020612]/70 backdrop-blur-md shadow-[0_0_30px_rgba(0,240,255,0.03)]">
-
-          {/* CORNER BRACKETS */}
 
           <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-cyan-400 pointer-events-none" />
 
@@ -2242,7 +2262,9 @@ export default function App() {
 
           <div className="absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 border-cyan-400 pointer-events-none" />
 
-          {/* THREE COLUMNS */}
+          {/* =================================================
+              COLUMNS
+              ================================================= */}
 
           <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] xl:grid-cols-[310px_1fr_310px] 2xl:grid-cols-[330px_1fr_330px] gap-3 lg:gap-4 items-start">
 
@@ -2394,9 +2416,9 @@ export default function App() {
 
       </div>
 
-      {/* =====================================================
+      {/* ===================================================
           MODALS
-          ===================================================== */}
+          =================================================== */}
 
       <ConversationHistoryModal
         isOpen={
