@@ -15,6 +15,7 @@ let micAudioContext: AudioContext | null = null;
 let micAnalyser: AnalyserNode | null = null;
 let micStream: MediaStream | null = null;
 let micAnimFrame: number | null = null;
+let silenceTimer: any = null;
 
 export function isSpeechRecognitionSupported(): boolean {
   if (typeof window === 'undefined') return false;
@@ -28,14 +29,31 @@ export function startSpeechRecognition(callbacks: SpeechListenerCallbacks) {
   }
 
   try {
-    // Stop any existing instance
+    // Interrupt any ongoing speech synthesis immediately
+    stopJarvisSpeech();
+
+    // Stop any previous recognition instance
     stopSpeechRecognition();
 
     const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     recognitionInstance = new SpeechRec();
-    recognitionInstance.continuous = false;
+    recognitionInstance.continuous = true;
     recognitionInstance.interimResults = true;
     recognitionInstance.lang = 'en-US';
+
+    let hasReceivedSpeech = false;
+    let latestTranscript = '';
+
+    const resetSilenceTimer = () => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      // Fast, responsive finalization on speech pause (350ms instead of 750ms)
+      silenceTimer = setTimeout(() => {
+        if (hasReceivedSpeech && latestTranscript.trim()) {
+          stopSpeechRecognition();
+          callbacks.onResult?.(latestTranscript.trim(), true);
+        }
+      }, 350);
+    };
 
     recognitionInstance.onstart = () => {
       callbacks.onStart?.();
@@ -54,20 +72,37 @@ export function startSpeechRecognition(callbacks: SpeechListenerCallbacks) {
         }
       }
 
-      if (finalTranscript) {
-        callbacks.onResult?.(finalTranscript, true);
-      } else if (interimTranscript) {
-        callbacks.onResult?.(interimTranscript, false);
+      const activeText = finalTranscript || interimTranscript;
+      if (activeText) {
+        hasReceivedSpeech = true;
+        latestTranscript = activeText;
+        callbacks.onResult?.(activeText, false);
+        resetSilenceTimer();
+      }
+
+      if (finalTranscript.trim()) {
+        if (silenceTimer) clearTimeout(silenceTimer);
+        stopSpeechRecognition();
+        callbacks.onResult?.(finalTranscript.trim(), true);
       }
     };
 
     recognitionInstance.onerror = (event: any) => {
-      console.warn('Speech recognition error:', event.error);
+      if (event.error === 'no-speech') {
+        // Ignorable background silence
+        return;
+      }
+      console.warn('Speech recognition notice:', event.error);
+      if (silenceTimer) clearTimeout(silenceTimer);
       callbacks.onError?.(event.error || 'Microphone error');
       cleanupMicAudio();
     };
 
     recognitionInstance.onend = () => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      if (hasReceivedSpeech && latestTranscript.trim()) {
+        callbacks.onResult?.(latestTranscript.trim(), true);
+      }
       callbacks.onEnd?.();
       cleanupMicAudio();
     };
@@ -81,6 +116,10 @@ export function startSpeechRecognition(callbacks: SpeechListenerCallbacks) {
 }
 
 export function stopSpeechRecognition() {
+  if (silenceTimer) {
+    clearTimeout(silenceTimer);
+    silenceTimer = null;
+  }
   if (recognitionInstance) {
     try {
       recognitionInstance.stop();
@@ -141,9 +180,28 @@ function cleanupMicAudio() {
   micAnalyser = null;
 }
 
-// Speech Synthesis (JARVIS British Voice Engine)
-let currentUtterance: SpeechSynthesisUtterance | null = null;
-let speechAnimInterval: any = null;
+// Speech Synthesis (JARVIS British Voice Engine powered by ttsService)
+import { ttsService, TTSOptions, selectBritishMaleVoice } from './ttsService';
+
+export type JarvisSpeechOptions = TTSOptions;
+
+export const streamingSpeaker = {
+  start(options: TTSOptions = {}, aiStartTime?: number) {
+    ttsService.startStreaming(options, aiStartTime);
+  },
+  pushToken(token: string) {
+    ttsService.pushToken(token);
+  },
+  finishStream() {
+    ttsService.finishStream();
+  },
+  stop() {
+    ttsService.stopPlayback();
+  },
+  interrupt() {
+    ttsService.interrupt();
+  }
+};
 
 export function getAvailableVoices(): SpeechSynthesisVoice[] {
   if (typeof window === 'undefined' || !window.speechSynthesis) return [];
@@ -152,103 +210,12 @@ export function getAvailableVoices(): SpeechSynthesisVoice[] {
 
 export function speakJarvis(
   text: string,
-  options: {
-    pitch?: number;
-    rate?: number;
-    volume?: number;
-    preferredVoice?: string;
-    onStart?: () => void;
-    onEnd?: () => void;
-    onAudioLevel?: (level: number) => void;
-  } = {}
+  options: TTSOptions = {}
 ) {
-  if (typeof window === 'undefined' || !window.speechSynthesis) {
-    options.onEnd?.();
-    return;
-  }
-
-  stopJarvisSpeech();
-
-  // Strip markdown or code tags for cleaner speech
-  const cleanText = text
-    .replace(/```[\s\S]*?```/g, 'Code block generated.')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/[*#_~]/g, '')
-    .trim();
-
-  if (!cleanText) {
-    options.onEnd?.();
-    return;
-  }
-
-  const utterance = new SpeechSynthesisUtterance(cleanText);
-  currentUtterance = utterance;
-
-  utterance.pitch = options.pitch ?? 0.95; // Slightly lower, authoritative pitch
-  utterance.rate = options.rate ?? 1.05; // Crisp cadence
-  utterance.volume = options.volume ?? 1.0;
-
-  // Find best JARVIS-like voice: British English Male or clean UK voice
-  const voices = window.speechSynthesis.getVoices();
-  let selectedVoice = voices.find(v => v.name === options.preferredVoice);
-
-  if (!selectedVoice) {
-    // Look for UK / British English
-    selectedVoice =
-      voices.find(v => v.lang === 'en-GB' && (v.name.includes('Male') || v.name.includes('Daniel') || v.name.includes('George') || v.name.includes('Oliver'))) ||
-      voices.find(v => v.lang === 'en-GB') ||
-      voices.find(v => v.name.includes('Google UK English') || v.name.includes('Natural')) ||
-      voices.find(v => v.lang.startsWith('en')) ||
-      voices[0];
-  }
-
-  if (selectedVoice) {
-    utterance.voice = selectedVoice;
-  }
-
-  utterance.onstart = () => {
-    options.onStart?.();
-    // Simulate real-time speech amplitude modulation for Arc Reactor core
-    let step = 0;
-    speechAnimInterval = setInterval(() => {
-      step++;
-      const base = 0.35 + 0.5 * Math.abs(Math.sin(step * 0.4) * Math.cos(step * 0.15));
-      const jitter = (Math.random() - 0.5) * 0.2;
-      options.onAudioLevel?.(Math.min(1, Math.max(0.1, base + jitter)));
-    }, 60);
-  };
-
-  utterance.onend = () => {
-    if (speechAnimInterval) {
-      clearInterval(speechAnimInterval);
-      speechAnimInterval = null;
-    }
-    options.onAudioLevel?.(0);
-    options.onEnd?.();
-    currentUtterance = null;
-  };
-
-  utterance.onerror = () => {
-    if (speechAnimInterval) {
-      clearInterval(speechAnimInterval);
-      speechAnimInterval = null;
-    }
-    options.onAudioLevel?.(0);
-    options.onEnd?.();
-    currentUtterance = null;
-  };
-
-  window.speechSynthesis.speak(utterance);
+  ttsService.speak(text, options);
 }
 
 export function stopJarvisSpeech() {
-  if (typeof window !== 'undefined' && window.speechSynthesis) {
-    window.speechSynthesis.cancel();
-  }
-  if (speechAnimInterval) {
-    clearInterval(speechAnimInterval);
-    speechAnimInterval = null;
-  }
-  currentUtterance = null;
+  ttsService.interrupt();
 }
+

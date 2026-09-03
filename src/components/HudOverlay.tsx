@@ -289,18 +289,38 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
           </div>
         )}
 
+        {/* Instant PROCESSING... status banner before first token arrives */}
+        {(isThinking || isUnderstanding) && (!currentMessage || currentMessage.role === 'user' || !currentMessage.content) && (
+          <div className="p-3 rounded bg-cyan-950/40 border border-cyan-500/30 flex items-center justify-between animate-pulse mb-2.5">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+              <span className="font-orbitron text-xs font-bold text-cyan-300 tracking-wider">
+                PROCESSING...
+              </span>
+            </div>
+            <span className="text-[10px] font-mono-tech text-cyan-400/70">
+              SYNAPSE ACTIVE // STREAMING TOKENS
+            </span>
+          </div>
+        )}
+
         {/* JARVIS Live Response & Tool Result */}
         {currentMessage && currentMessage.role === 'assistant' && (
           <div className="p-2.5 rounded bg-slate-900/60 border border-cyan-500/20">
             <div className="flex items-center justify-between text-[10px] font-orbitron text-cyan-300 uppercase tracking-wider mb-1.5">
               <div className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-cyan-300 animate-pulse" />
+                <span className={`w-1.5 h-1.5 rounded-full ${isSpeaking ? 'bg-cyan-300 animate-ping' : 'bg-cyan-400'}`} />
                 <span>J.A.R.V.I.S. RESPONSE</span>
               </div>
-              <span className="text-cyan-400/60 font-mono-tech">STARK AI v4.8</span>
+              <span className="text-cyan-400/60 font-mono-tech">
+                {isSpeaking ? 'STREAMING VOCAL' : 'STARK AI v4.8'}
+              </span>
             </div>
             <p className="text-xs sm:text-sm text-cyan-100 leading-relaxed font-rajdhani whitespace-pre-wrap">
               {currentMessage.content}
+              {(isSpeaking || isGenerating) && (
+                <span className="inline-block w-1.5 h-3.5 ml-1 bg-cyan-400 animate-pulse align-middle" />
+              )}
             </p>
 
             {/* Tool Output Rendering if any */}

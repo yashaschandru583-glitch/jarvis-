@@ -94,9 +94,9 @@
 
 /* HUD Panels with Corner Accents */
 .hud-panel {
-  background: rgba(2, 4, 10, 0.85);
-  backdrop-filter: blur(16px);
-  border: 1px solid rgba(34, 211, 238, 0.22);
+  background: rgba(3, 7, 18, 0.88);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(34, 211, 238, 0.25);
   position: relative;
 }
 
@@ -105,10 +105,11 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-top: 2px solid #22d3ee;
   border-left: 2px solid #22d3ee;
+  pointer-events: none;
 }
 
 .hud-panel::after {
@@ -116,22 +117,86 @@
   position: absolute;
   bottom: 0;
   right: 0;
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-bottom: 2px solid #22d3ee;
   border-right: 2px solid #22d3ee;
+  pointer-events: none;
 }
 
-/* Scanline Effect */
+.hud-corner-tl {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 6px;
+  border-top: 1.5px solid #22d3ee;
+  border-left: 1.5px solid #22d3ee;
+  pointer-events: none;
+}
+
+.hud-corner-tr {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border-top: 1.5px solid #22d3ee;
+  border-right: 1.5px solid #22d3ee;
+  pointer-events: none;
+}
+
+.hud-corner-bl {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 6px;
+  height: 6px;
+  border-bottom: 1.5px solid #22d3ee;
+  border-left: 1.5px solid #22d3ee;
+  pointer-events: none;
+}
+
+.hud-corner-br {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border-bottom: 1.5px solid #22d3ee;
+  border-right: 1.5px solid #22d3ee;
+  pointer-events: none;
+}
+
+/* Futuristic Scanline Effect */
 .scanlines {
   background: linear-gradient(
     to bottom,
     rgba(255,255,255,0),
     rgba(255,255,255,0) 50%,
-    rgba(0, 0, 0, 0.25) 50%,
-    rgba(0, 0, 0, 0.25)
+    rgba(0, 0, 0, 0.4) 50%,
+    rgba(0, 0, 0, 0.4)
   );
   background-size: 100% 4px;
+}
+
+/* Radar & Scanning sweeps */
+@keyframes radarSweep {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes scanlineVertical {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(1000%); }
+}
+
+.animate-radar-sweep {
+  animation: radarSweep 6s linear infinite;
+}
+
+.animate-scan-beam {
+  animation: scanlineVertical 4s ease-in-out infinite;
 }
 
 /* Animations */

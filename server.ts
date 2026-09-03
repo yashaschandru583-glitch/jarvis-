@@ -3,8 +3,74 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type, FunctionDeclaration } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
+import { APPLICATION_REGISTRY, resolveApplication, resolveWebsite } from './src/utils/appRegistry';
+import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 
 dotenv.config();
+
+// In-memory audio cache for instant zero-latency TTS responses
+interface TTSAudioCacheEntry {
+  buffer: Buffer;
+  timestamp: number;
+}
+const ttsAudioCache = new Map<string, TTSAudioCacheEntry>();
+
+function getTTSCacheKey(text: string, rate: any, pitch: any, voice: string): string {
+  return `${text.trim().toLowerCase()}_${rate || '1.2'}_${pitch || '0.9'}_${voice || 'ryan'}`;
+}
+
+function formatRateParam(rate: number | string | undefined): string {
+  if (!rate) return '+20%';
+  const num = typeof rate === 'string' ? parseFloat(rate) : rate;
+  if (isNaN(num)) return '+20%';
+  const pct = Math.round((num - 1.0) * 100);
+  return pct >= 0 ? `+${pct}%` : `${pct}%`;
+}
+
+function formatPitchParam(pitch: number | string | undefined): string {
+  if (!pitch) return '-4%';
+  const num = typeof pitch === 'string' ? parseFloat(pitch) : pitch;
+  if (isNaN(num)) return '-4%';
+  const pct = Math.round((num - 1.0) * 100);
+  return pct >= 0 ? `+${pct}%` : `${pct}%`;
+}
+
+// Background pre-warming of common instant J.A.R.V.I.S. vocal responses
+async function preWarmTTSCache() {
+  const commonPhrases = [
+    'Opening Chrome.',
+    'Searching now.',
+    '4.',
+    '625.',
+    'Yes, sir?',
+    'All systems operational, sir.',
+    'Understood.',
+    'Good day, sir. J.A.R.V.I.S. online.',
+    'Operation cancelled, sir.',
+    'Always.',
+  ];
+
+  for (const phrase of commonPhrases) {
+    try {
+      const cacheKey = getTTSCacheKey(phrase, 1.2, 0.9, 'en-GB-RyanNeural');
+      if (ttsAudioCache.has(cacheKey)) continue;
+
+      const tts = new MsEdgeTTS();
+      await tts.setMetadata('en-GB-RyanNeural', OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+      const { audioStream } = tts.toStream(phrase, { rate: '+20%', pitch: '-4%' });
+      const chunks: Buffer[] = [];
+      audioStream.on('data', (c) => chunks.push(c));
+      audioStream.on('end', () => {
+        ttsAudioCache.set(cacheKey, { buffer: Buffer.concat(chunks), timestamp: Date.now() });
+        tts.close();
+      });
+      audioStream.on('error', () => {
+        try { tts.close(); } catch (_) {}
+      });
+    } catch (_) {}
+  }
+}
+setTimeout(() => { preWarmTTSCache().catch(() => {}); }, 1000);
 
 const app = express();
 const PORT = 3000;
@@ -177,6 +243,72 @@ const getSystemStatusDeclaration: FunctionDeclaration = {
         description: 'Optional subsystem to inspect: "reactor", "containment", "network", or "all".',
       },
     },
+  },
+};
+
+const openApplicationDeclaration: FunctionDeclaration = {
+  name: 'open_desktop_application',
+  description: 'Launch an authorized desktop application such as Chrome, VS Code, Calculator, Notepad, Spotify, Discord, Terminal, File Explorer, or Web Browser on the user\'s computer.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      applicationName: {
+        type: Type.STRING,
+        description: 'Name or alias of the application, e.g. "chrome", "vscode", "calculator", "notepad", "spotify", "discord", "terminal", "explorer".',
+      },
+    },
+    required: ['applicationName'],
+  },
+};
+
+const closeApplicationDeclaration: FunctionDeclaration = {
+  name: 'close_desktop_application',
+  description: 'Close/terminate an authorized desktop application on the user\'s computer.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      applicationName: {
+        type: Type.STRING,
+        description: 'Name or alias of the application to close, e.g. "chrome", "calculator", "spotify", "vscode".',
+      },
+      confirmed: {
+        type: Type.BOOLEAN,
+        description: 'True if user has explicitly confirmed closing the application.',
+      },
+    },
+    required: ['applicationName'],
+  },
+};
+
+const openWebsiteDeclaration: FunctionDeclaration = {
+  name: 'open_website',
+  description: 'Open a website URL or perform a targeted search on a web destination (e.g. YouTube, Google, GitHub, Gmail, ChatGPT, Wikipedia).',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      url: {
+        type: Type.STRING,
+        description: 'Full URL to open (e.g. "https://www.youtube.com" or direct search URL).',
+      },
+      siteName: {
+        type: Type.STRING,
+        description: 'Name of the website destination (e.g. "YouTube", "Google", "GitHub").',
+      },
+      searchQuery: {
+        type: Type.STRING,
+        description: 'Optional search query if user asked to search for something on that website.',
+      },
+    },
+    required: ['url'],
+  },
+};
+
+const getRunningApplicationsDeclaration: FunctionDeclaration = {
+  name: 'get_running_applications',
+  description: 'Check and list all authorized applications currently running on the user\'s computer.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {},
   },
 };
 
@@ -580,6 +712,143 @@ async function executeTool(name: string, args: Record<string, any>): Promise<any
       };
     }
 
+    case 'open_desktop_application': {
+      const appName = args.applicationName || '';
+      const resolved = resolveApplication(appName);
+      if (!resolved) {
+        return {
+          success: false,
+          error: `Application "${appName}" is not recognized in the authorized registry.`,
+          allowedApps: APPLICATION_REGISTRY.map(a => a.name)
+        };
+      }
+
+      // Attempt to communicate with local agent
+      try {
+        const agentRes = await fetch('http://127.0.0.1:39281/action', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer STARK-JARVIS-SECURE-LOCAL-KEY'
+          },
+          body: JSON.stringify({ action: 'OPEN_APPLICATION', target: resolved.id }),
+          signal: AbortSignal.timeout(1500)
+        });
+        if (agentRes.ok) {
+          const data = await agentRes.json() as any;
+          return {
+            success: true,
+            app: resolved.name,
+            appId: resolved.id,
+            status: 'launched',
+            message: data.message || `${resolved.name} launched successfully.`
+          };
+        }
+      } catch (_) {}
+
+      return {
+        success: true,
+        app: resolved.name,
+        appId: resolved.id,
+        status: 'dispatch_to_client',
+        message: `Opening ${resolved.name}.`
+      };
+    }
+
+    case 'close_desktop_application': {
+      const appName = args.applicationName || '';
+      const confirmed = !!args.confirmed;
+      const resolved = resolveApplication(appName);
+
+      if (!resolved) {
+        return {
+          success: false,
+          error: `Application "${appName}" not found in application registry.`
+        };
+      }
+
+      if (!confirmed) {
+        return {
+          success: false,
+          requiresConfirmation: true,
+          app: resolved.name,
+          appId: resolved.id,
+          message: `Are you sure you want to terminate ${resolved.name}? Any unsaved work will be lost.`
+        };
+      }
+
+      try {
+        const agentRes = await fetch('http://127.0.0.1:39281/action', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer STARK-JARVIS-SECURE-LOCAL-KEY'
+          },
+          body: JSON.stringify({ action: 'CLOSE_APPLICATION', target: resolved.id }),
+          signal: AbortSignal.timeout(1500)
+        });
+        if (agentRes.ok) {
+          const data = await agentRes.json() as any;
+          return {
+            success: true,
+            app: resolved.name,
+            appId: resolved.id,
+            status: 'terminated',
+            message: data.message || `${resolved.name} closed.`
+          };
+        }
+      } catch (_) {}
+
+      return {
+        success: true,
+        app: resolved.name,
+        appId: resolved.id,
+        status: 'dispatch_to_client',
+        message: `Closing ${resolved.name}.`
+      };
+    }
+
+    case 'open_website': {
+      const rawUrl = args.url || '';
+      const query = args.searchQuery || '';
+      const resolution = resolveWebsite(rawUrl || query || args.siteName || '');
+      const finalUrl = resolution?.url || (rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
+
+      return {
+        success: true,
+        url: finalUrl,
+        siteName: resolution?.siteName || args.siteName || 'Website',
+        searchQuery: resolution?.searchQuery || query,
+        isSearch: resolution?.isSearch || !!query,
+        message: resolution?.isSearch
+          ? `Opening ${resolution.siteName} and searching for ${resolution.searchQuery}.`
+          : `Navigating to ${resolution?.title || finalUrl}.`
+      };
+    }
+
+    case 'get_running_applications': {
+      try {
+        const agentRes = await fetch('http://127.0.0.1:39281/running-apps', {
+          headers: { 'Authorization': 'Bearer STARK-JARVIS-SECURE-LOCAL-KEY' },
+          signal: AbortSignal.timeout(1500)
+        });
+        if (agentRes.ok) {
+          const data = await agentRes.json() as any;
+          return {
+            success: true,
+            runningApps: data.runningApps || [],
+            count: (data.runningApps || []).length
+          };
+        }
+      } catch (_) {}
+
+      return {
+        success: false,
+        message: 'The desktop agent is not currently connected to query active OS processes.',
+        runningApps: []
+      };
+    }
+
     default:
       return { status: 'executed', args };
   }
@@ -744,7 +1013,103 @@ async function fallbackJarvisResponse(prompt: string): Promise<{
     };
   }
 
-  // 4. Pre-indexed Knowledge Base match
+  // 4. Desktop Applications & Control
+  // Open application
+  const openAppMatch = lower.match(/^(?:jarvis,?\s*)?(?:open|launch|start|run|bring up)\s+(?:the\s+)?([a-zA-Z0-9\s]+?)\.?$/i);
+  if (openAppMatch && openAppMatch[1]) {
+    const candidate = openAppMatch[1].trim();
+    const resolved = resolveApplication(candidate);
+    if (resolved) {
+      steps.push('Consulting Stark application registry', `Verifying executable signature for ${resolved.name}`, 'Dispatching execution protocol to local agent');
+      const toolRes = await executeTool('open_desktop_application', { applicationName: resolved.name });
+      return {
+        reply: `Opening ${resolved.name}, sir.`,
+        toolUsed: {
+          name: 'open_desktop_application',
+          args: { applicationName: resolved.name },
+          result: toolRes
+        },
+        executionSteps: steps
+      };
+    }
+  }
+
+  // Close application
+  const closeAppMatch = lower.match(/^(?:jarvis,?\s*)?(?:close|quit|kill|terminate|shut down)\s+(?:the\s+)?([a-zA-Z0-9\s]+?)\.?$/i);
+  if (closeAppMatch && closeAppMatch[1]) {
+    const candidate = closeAppMatch[1].trim();
+    const resolved = resolveApplication(candidate);
+    if (resolved) {
+      steps.push('Targeting running process signature', `Executing termination protocol for ${resolved.name}`);
+      const toolRes = await executeTool('close_desktop_application', { applicationName: resolved.name, confirmed: true });
+      return {
+        reply: `${resolved.name} has been closed, sir.`,
+        toolUsed: {
+          name: 'close_desktop_application',
+          args: { applicationName: resolved.name, confirmed: true },
+          result: toolRes
+        },
+        executionSteps: steps
+      };
+    }
+  }
+
+  // Website & Smart Search Commands (e.g. "open YouTube and search for Python tutorials")
+  const websiteRes = resolveWebsite(prompt);
+  if (websiteRes) {
+    steps.push(`Resolving domain for ${websiteRes.siteName}`, websiteRes.isSearch ? `Constructing search parameters: "${websiteRes.searchQuery}"` : 'Directing web interface');
+    const toolRes = await executeTool('open_website', {
+      url: websiteRes.url,
+      siteName: websiteRes.siteName,
+      searchQuery: websiteRes.searchQuery
+    });
+    const spoken = websiteRes.isSearch
+      ? `Opening ${websiteRes.siteName} and searching for ${websiteRes.searchQuery}, sir.`
+      : `Opening ${websiteRes.title || websiteRes.siteName}, sir.`;
+    return {
+      reply: spoken,
+      sources: [{
+        title: websiteRes.title,
+        url: websiteRes.url,
+        domain: websiteRes.siteName.toLowerCase(),
+        snippet: `Destination navigation: ${websiteRes.url}`
+      }],
+      toolUsed: {
+        name: 'open_website',
+        args: { url: websiteRes.url, siteName: websiteRes.siteName, searchQuery: websiteRes.searchQuery },
+        result: toolRes
+      },
+      executionSteps: steps
+    };
+  }
+
+  // Running applications check
+  if (
+    /^(?:which|what)\s+(?:apps|applications|processes)\s+are\s+(?:currently\s+)?running\??$/i.test(lower) ||
+    /^(?:what('?s| is)\s+running(?:\s+on\s+my\s+computer)?|show\s+running\s+apps)\??$/i.test(lower)
+  ) {
+    steps.push('Scanning active operating system processes', 'Matching against allowed application registry');
+    const toolRes = await executeTool('get_running_applications', {});
+    const running = toolRes.runningApps || [];
+    let replyMsg = 'No monitored applications are currently active on your computer.';
+    if (running.length > 0) {
+      const names = running.map((r: any) => r.name);
+      replyMsg = `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} currently running, sir.`;
+    } else if (toolRes.message) {
+      replyMsg = toolRes.message;
+    }
+    return {
+      reply: replyMsg,
+      toolUsed: {
+        name: 'get_running_applications',
+        args: {},
+        result: toolRes
+      },
+      executionSteps: steps
+    };
+  }
+
+  // 5. Pre-indexed Knowledge Base match
   for (const item of FACTUAL_KNOWLEDGE_BASE) {
     if (item.keywords.some(kw => lower.includes(kw))) {
       steps.push('Verifying historical/scientific data', 'Synthesizing verified factual response');
@@ -856,6 +1221,579 @@ app.get('/api/system/telemetry', (req, res) => {
 });
 
 // Primary Assistant Interaction Endpoint
+// Fast direct classifier for instant (sub-10ms) responses without unnecessary LLM overhead
+function classifyFastDirective(prompt: string): {
+  type: 'time' | 'math' | 'weather' | 'open_app' | 'close_app' | 'open_website' | 'running_apps' | 'search' | 'none';
+  data?: any;
+} {
+  const lower = prompt.trim().toLowerCase();
+  
+  // 1. Time / Date direct queries
+  if (
+    /^(what('?s| is) the (time|date|day)|what time is it|what date is it|what day is it|current time|today'?s date)\??$/i.test(lower) ||
+    lower === 'time' || lower === 'date' || lower === 'what is today'
+  ) {
+    return { type: 'time' };
+  }
+
+  // 2. Direct pure arithmetic
+  const mathMatch = lower.match(/^(?:what is|calculate|compute)?\s*([0-9\s.+\-*/^()%]+)\??$/i);
+  if (mathMatch && mathMatch[1] && /[0-9]/.test(mathMatch[1]) && /[+\-*/^%]/.test(mathMatch[1])) {
+    return { type: 'math', data: mathMatch[1].trim() };
+  }
+  const multMatch = lower.match(/^(?:what is|calculate)?\s*([0-9.]+)\s*(?:x|\*|times|multiplied by)\s*([0-9.]+)\??$/i);
+  if (multMatch) {
+    return { type: 'math', data: `${multMatch[1]} * ${multMatch[2]}` };
+  }
+
+  // 3. Direct weather query
+  const weatherMatch = lower.match(/^(?:what('?s| is) the )?weather (?:in|for|at) ([a-zA-Z\s]+)\??$/i);
+  if (weatherMatch && weatherMatch[2]) {
+    return { type: 'weather', data: weatherMatch[2].trim() };
+  }
+
+  // 4. Desktop App Launch queries (e.g. "open Chrome", "launch VS Code", "open calculator")
+  const openAppMatch = lower.match(/^(?:jarvis,?\s*)?(?:open|launch|start|run|bring up)\s+(?:the\s+)?([a-zA-Z0-9\s]+?)\.?$/i);
+  if (openAppMatch && openAppMatch[1]) {
+    const candidate = openAppMatch[1].trim();
+    if (!/(?:youtube|google|github|gmail|chatgpt|wikipedia|reddit|twitter|amazon|netflix|search)/i.test(candidate)) {
+      const resolved = resolveApplication(candidate);
+      if (resolved) {
+        return { type: 'open_app', data: resolved };
+      }
+    }
+  }
+
+  // 5. Desktop App Close queries (e.g. "close Chrome", "quit Spotify", "shut down VS Code")
+  const closeAppMatch = lower.match(/^(?:jarvis,?\s*)?(?:close|quit|kill|terminate|shut down)\s+(?:the\s+)?([a-zA-Z0-9\s]+?)\.?$/i);
+  if (closeAppMatch && closeAppMatch[1]) {
+    const candidate = closeAppMatch[1].trim();
+    const resolved = resolveApplication(candidate);
+    if (resolved) {
+      return { type: 'close_app', data: resolved };
+    }
+  }
+
+  // 6. Website & Smart Search queries (e.g. "open YouTube", "open YouTube and search for Python tutorials")
+  const siteRes = resolveWebsite(prompt);
+  if (siteRes) {
+    return { type: 'open_website', data: siteRes };
+  }
+
+  // 7. Running applications query
+  if (
+    /^(?:which|what)\s+(?:apps|applications|processes)\s+are\s+(?:currently\s+)?running\??$/i.test(lower) ||
+    /^(?:what('?s| is)\s+running(?:\s+on\s+my\s+computer)?|show\s+running\s+apps)\??$/i.test(lower)
+  ) {
+    return { type: 'running_apps' };
+  }
+
+  // 8. Search queries (e.g. "Search today's AI news", "Search for quantum computing")
+  const searchMatch = lower.match(/^(?:jarvis,?\s*)?(?:search\s+(?:for\s+)?|look\s+up\s+)(.+)$/i);
+  if (searchMatch && searchMatch[1]) {
+    return { type: 'search', data: searchMatch[1].trim() };
+  }
+
+  return { type: 'none' };
+}
+
+// Low-Latency Neural TTS Audio Chunk Synthesis Endpoint
+app.all('/api/tts/chunk', async (req, res) => {
+  const text = (req.method === 'POST' ? req.body?.text : req.query?.text) as string;
+  const rate = (req.method === 'POST' ? req.body?.rate : req.query?.rate) ?? 1.20;
+  const pitch = (req.method === 'POST' ? req.body?.pitch : req.query?.pitch) ?? 0.90;
+  const voice = ((req.method === 'POST' ? req.body?.voice : req.query?.voice) as string) || 'en-GB-RyanNeural';
+
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    return res.status(400).json({ error: 'Text parameter is required' });
+  }
+
+  const cleanText = text.trim();
+  const cacheKey = getTTSCacheKey(cleanText, rate, pitch, voice);
+
+  // 1. Check instant cache (0ms latency for frequent phrases)
+  const cached = ttsAudioCache.get(cacheKey);
+  if (cached) {
+    res.writeHead(200, {
+      'Content-Type': 'audio/mpeg',
+      'Content-Length': cached.buffer.length,
+      'Cache-Control': 'public, max-age=86400',
+      'X-TTS-Source': 'memory-cache',
+      'X-TTS-Latency': '0ms',
+    });
+    return res.end(cached.buffer);
+  }
+
+  const t0 = Date.now();
+
+  try {
+    const tts = new MsEdgeTTS();
+    await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+
+    const rateStr = formatRateParam(rate);
+    const pitchStr = formatPitchParam(pitch);
+
+    const { audioStream } = tts.toStream(cleanText, { rate: rateStr, pitch: pitchStr });
+
+    let headersSent = false;
+    const chunks: Buffer[] = [];
+
+    // Timeout safety: if upstream stalls for 2500ms, abort and trigger client fallback
+    const timeout = setTimeout(() => {
+      try { tts.close(); } catch (_) {}
+      if (!headersSent) {
+        headersSent = true;
+        res.status(503).json({ error: 'TTS upstream timeout', fallback: 'browser' });
+      }
+    }, 2500);
+
+    audioStream.on('data', (chunk: Buffer) => {
+      if (!headersSent) {
+        headersSent = true;
+        clearTimeout(timeout);
+        res.writeHead(200, {
+          'Content-Type': 'audio/mpeg',
+          'Cache-Control': 'no-cache',
+          'Transfer-Encoding': 'chunked',
+          'X-TTS-Source': 'msedge-neural-stream',
+          'X-TTS-TTFA': `${Date.now() - t0}ms`,
+        });
+      }
+      chunks.push(chunk);
+      res.write(chunk);
+    });
+
+    audioStream.on('end', () => {
+      clearTimeout(timeout);
+      if (!headersSent) {
+        res.status(500).json({ error: 'No audio generated', fallback: 'browser' });
+      } else {
+        res.end();
+        const fullBuf = Buffer.concat(chunks);
+        if (fullBuf.length > 0 && cleanText.length < 350) {
+          if (ttsAudioCache.size > 300) {
+            const firstKey = ttsAudioCache.keys().next().value;
+            if (firstKey) ttsAudioCache.delete(firstKey);
+          }
+          ttsAudioCache.set(cacheKey, { buffer: fullBuf, timestamp: Date.now() });
+        }
+      }
+      try { tts.close(); } catch (_) {}
+    });
+
+    audioStream.on('error', (err) => {
+      clearTimeout(timeout);
+      console.warn('TTS streaming error:', err);
+      try { tts.close(); } catch (_) {}
+      if (!headersSent) {
+        res.status(500).json({ error: 'TTS generation failed', fallback: 'browser' });
+      } else {
+        res.end();
+      }
+    });
+
+    req.on('close', () => {
+      clearTimeout(timeout);
+      try { tts.close(); } catch (_) {}
+    });
+  } catch (err: any) {
+    console.error('TTS endpoint error:', err);
+    return res.status(500).json({ error: err.message || 'TTS failure', fallback: 'browser' });
+  }
+});
+
+// Low-latency Streaming SSE Assistant Endpoint
+app.post('/api/assistant/stream', async (req, res) => {
+  const { prompt, history = [], style = 'concise' } = req.body;
+
+  if (!prompt || typeof prompt !== 'string') {
+    return res.status(400).json({ error: 'Prompt is required' });
+  }
+
+  // Set Server-Sent Events headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  const sendEvent = (data: any) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  sendEvent({ type: 'start' });
+
+  // 1. Ultra-fast direct routing for deterministic queries
+  const fastRoute = classifyFastDirective(prompt);
+
+  if (fastRoute.type === 'time') {
+    const timeData = await executeTool('get_current_time', {});
+    const reply = `The current time is ${timeData.currentTime} on ${timeData.currentDate}. All chronological matrices are synchronized.`;
+    const toolObj = { name: 'get_current_time', args: {}, result: timeData };
+    sendEvent({ type: 'tool', tool: toolObj });
+    sendEvent({ type: 'token', delta: reply });
+    sendEvent({ type: 'done', reply, toolUsed: toolObj });
+    return res.end();
+  }
+
+  if (fastRoute.type === 'math' && fastRoute.data) {
+    const mathResult = evaluateMathematicalExpression(fastRoute.data);
+    if (mathResult && mathResult.status === 'success') {
+      const reply = `${mathResult.result}.`;
+      const toolObj = { name: 'calculate_math', args: { expression: fastRoute.data }, result: mathResult };
+      sendEvent({ type: 'tool', tool: toolObj });
+      sendEvent({ type: 'token', delta: reply });
+      sendEvent({ type: 'done', reply, toolUsed: toolObj });
+      return res.end();
+    }
+  }
+
+  if (fastRoute.type === 'weather' && fastRoute.data) {
+    const weatherData = await fetchLiveWeather(fastRoute.data);
+    const reply = `In ${weatherData.location}, it is currently ${weatherData.temperature} and ${weatherData.condition.toLowerCase()} with ${weatherData.humidity} humidity.`;
+    const toolObj = { name: 'get_weather', args: { location: fastRoute.data }, result: weatherData };
+    sendEvent({ type: 'tool', tool: toolObj });
+    sendEvent({ type: 'token', delta: reply });
+    sendEvent({
+      type: 'done',
+      reply,
+      sources: [{
+        title: `Open-Meteo Satellite Feed — ${weatherData.location}`,
+        url: 'https://open-meteo.com',
+        domain: 'open-meteo.com',
+        snippet: `Real-time satellite weather telemetry for ${weatherData.location}`
+      }],
+      toolUsed: toolObj
+    });
+    return res.end();
+  }
+
+  if (fastRoute.type === 'open_app' && fastRoute.data) {
+    const app = fastRoute.data;
+    const toolRes = await executeTool('open_desktop_application', { applicationName: app.name });
+    const reply = `Opening ${app.name}.`;
+    const toolObj = {
+      name: 'open_desktop_application',
+      args: { applicationName: app.name },
+      result: toolRes
+    };
+    sendEvent({ type: 'tool', tool: toolObj });
+    sendEvent({ type: 'token', delta: reply });
+    sendEvent({ type: 'done', reply, toolUsed: toolObj });
+    return res.end();
+  }
+
+  if (fastRoute.type === 'close_app' && fastRoute.data) {
+    const app = fastRoute.data;
+    const toolRes = await executeTool('close_desktop_application', { applicationName: app.name, confirmed: true });
+    const reply = `${app.name} closed.`;
+    const toolObj = {
+      name: 'close_desktop_application',
+      args: { applicationName: app.name, confirmed: true },
+      result: toolRes
+    };
+    sendEvent({ type: 'tool', tool: toolObj });
+    sendEvent({ type: 'token', delta: reply });
+    sendEvent({ type: 'done', reply, toolUsed: toolObj });
+    return res.end();
+  }
+
+  if (fastRoute.type === 'search' && fastRoute.data) {
+    const query = fastRoute.data;
+    // Immediately emit initial phrase so TTS starts vocalizing in <250ms
+    sendEvent({ type: 'token', delta: 'Searching now. ' });
+    sendEvent({ type: 'step', step: `Searching web for: "${query}"` });
+
+    const searchResult = await executeTool('search_web', { query });
+    const toolObj = { name: 'search_web', args: { query }, result: searchResult };
+    sendEvent({ type: 'tool', tool: toolObj });
+
+    const summary = searchResult.summary || searchResult.content || `Search complete for ${query}.`;
+    sendEvent({ type: 'token', delta: summary });
+    const fullReply = `Searching now. ${summary}`;
+    sendEvent({
+      type: 'done',
+      reply: fullReply,
+      sources: searchResult.sources || (searchResult.sourceUrl ? [{ title: searchResult.title || query, url: searchResult.sourceUrl, domain: 'search' }] : []),
+      toolUsed: toolObj
+    });
+    return res.end();
+  }
+
+  if (fastRoute.type === 'open_website' && fastRoute.data) {
+    const site = fastRoute.data;
+    const toolRes = await executeTool('open_website', {
+      url: site.url,
+      siteName: site.siteName,
+      searchQuery: site.searchQuery
+    });
+    const reply = site.isSearch
+      ? `Opening ${site.siteName} and searching for ${site.searchQuery}.`
+      : `Opening ${site.title || site.siteName}.`;
+    const toolObj = {
+      name: 'open_website',
+      args: { url: site.url, siteName: site.siteName, searchQuery: site.searchQuery },
+      result: toolRes
+    };
+    sendEvent({ type: 'tool', tool: toolObj });
+    sendEvent({ type: 'token', delta: reply });
+    sendEvent({
+      type: 'done',
+      reply,
+      sources: [{
+        title: site.title,
+        url: site.url,
+        domain: site.siteName.toLowerCase(),
+        snippet: `Destination navigation: ${site.url}`
+      }],
+      toolUsed: toolObj
+    });
+    return res.end();
+  }
+
+  if (fastRoute.type === 'running_apps') {
+    const toolRes = await executeTool('get_running_applications', {});
+    const running = toolRes.runningApps || [];
+    let reply = 'No monitored applications are currently running on your computer.';
+    if (running.length > 0) {
+      const names = running.map((r: any) => r.name);
+      reply = `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} currently running, sir.`;
+    } else if (toolRes.message) {
+      reply = toolRes.message;
+    }
+    const toolObj = {
+      name: 'get_running_applications',
+      args: {},
+      result: toolRes
+    };
+    sendEvent({ type: 'tool', tool: toolObj });
+    sendEvent({ type: 'token', delta: reply });
+    sendEvent({ type: 'done', reply, toolUsed: toolObj });
+    return res.end();
+  }
+
+  // 2. AI Model Streaming Execution
+  const ai = getGenAI();
+
+  if (!ai) {
+    const fallback = await fallbackJarvisResponse(prompt);
+    if (fallback.toolUsed) {
+      sendEvent({ type: 'tool', tool: fallback.toolUsed });
+    }
+    const words = fallback.reply.split(' ');
+    for (let i = 0; i < words.length; i++) {
+      sendEvent({ type: 'token', delta: (i > 0 ? ' ' : '') + words[i] });
+    }
+    sendEvent({
+      type: 'done',
+      reply: fallback.reply,
+      sources: fallback.sources,
+      toolUsed: fallback.toolUsed,
+      demoMode: true
+    });
+    return res.end();
+  }
+
+  try {
+    const systemInstruction = `You are J.A.R.V.I.S., Tony Stark's ultra-advanced AI operating system.
+SPEED & ACCURACY PROTOCOLS:
+1. SHORTER SPOKEN RESPONSES & IMMEDIATE VOICE LATENCY:
+   - For simple questions or calculations, answer with the direct answer in 1 sentence or direct value.
+     Example: "What is 25 times 25?" -> "625."
+     Example: "What is 2 + 2?" -> "4."
+     Example: "Who is the Prime Minister of India?" -> "The Prime Minister of India is Narendra Modi."
+   - For commands or system actions, acknowledge with 2-3 words:
+     Example: "Open Chrome." -> "Opening Chrome."
+     Example: "Search today's AI news." -> "Searching now."
+   - For explanations (e.g. "Explain artificial intelligence"), begin immediately with the direct definition in the first sentence:
+     "Artificial intelligence is the simulation of human intelligence processes by computer systems."
+     Then follow with 1-2 essential details. Avoid conversational fluff, repeated apologies, or filler words.
+2. LIVE TOOLS:
+   - For current time/date -> use 'get_current_time'.
+   - For real-time weather -> use 'get_weather'.
+   - For current news, recent events, or deep lookup -> use 'search_web'.
+   - For calculations -> use 'calculate_math'.
+   - For task management -> use 'manage_stark_task'.
+3. ACCURACY: Provide exact, factually correct, and verified information.
+STYLE: ${style}. Current: ${new Date().toISOString()}`;
+
+    const tools = [
+      {
+        functionDeclarations: [
+          searchWebDeclaration,
+          getWeatherDeclaration,
+          calculateMathDeclaration,
+          getCurrentTimeDeclaration,
+          manageTaskDeclaration,
+          translateTextDeclaration,
+          getSystemStatusDeclaration,
+          openApplicationDeclaration,
+          closeApplicationDeclaration,
+          openWebsiteDeclaration,
+          getRunningApplicationsDeclaration,
+        ],
+      },
+    ];
+
+    // Limit conversation context to recent 4 turns to optimize TTFT and token efficiency
+    const contents: any[] = [];
+    const recentHistory = Array.isArray(history) ? history.slice(-4) : [];
+    for (const msg of recentHistory) {
+      if (msg && msg.content && typeof msg.content === 'string') {
+        contents.push({
+          role: msg.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: msg.content }]
+        });
+      }
+    }
+    contents.push({
+      role: 'user',
+      parts: [{ text: prompt }]
+    });
+
+    // Lowest-latency candidate model chain
+    const candidateModels = [
+      'gemini-3.6-flash',
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-3.7-flash',
+      'gemini-3.1-pro-preview'
+    ];
+
+    let responseStream: any = null;
+    let selectedModel = candidateModels[0];
+
+    for (const modelName of candidateModels) {
+      try {
+        responseStream = await ai.models.generateContentStream({
+          model: modelName,
+          contents,
+          config: {
+            systemInstruction,
+            tools,
+            temperature: 0.6,
+            maxOutputTokens: 600,
+          },
+        });
+        selectedModel = modelName;
+        break;
+      } catch (mErr: any) {
+        console.warn(`Model ${modelName} stream initiation notice:`, mErr?.message || mErr);
+      }
+    }
+
+    if (!responseStream) {
+      throw new Error('All candidate streaming models unavailable');
+    }
+
+    let accumulatedReply = '';
+    const pendingToolCalls: any[] = [];
+
+    for await (const chunk of responseStream) {
+      if (chunk.text) {
+        accumulatedReply += chunk.text;
+        sendEvent({ type: 'token', delta: chunk.text });
+      }
+      if (chunk.functionCalls && chunk.functionCalls.length > 0) {
+        pendingToolCalls.push(...chunk.functionCalls);
+      }
+    }
+
+    let executedToolObj: any = null;
+    let sourcesList: any[] = [];
+
+    // Handle tool call if model requested one
+    if (pendingToolCalls.length > 0) {
+      const call = pendingToolCalls[0];
+      if (call.name === 'search_web' && accumulatedReply.trim().length === 0) {
+        // Emit instantaneous verbal cue so TTS starts speaking immediately
+        accumulatedReply = 'Searching now. ';
+        sendEvent({ type: 'token', delta: 'Searching now. ' });
+      }
+      sendEvent({ type: 'step', step: `Executing protocol: ${call.name}` });
+      const toolResult = await executeTool(call.name, call.args || {});
+      executedToolObj = { name: call.name, args: call.args || {}, result: toolResult };
+      sendEvent({ type: 'tool', tool: executedToolObj });
+
+      if (toolResult?.sources && Array.isArray(toolResult.sources)) {
+        sourcesList = toolResult.sources;
+      } else if (call.name === 'search_web' && toolResult?.sourceUrl) {
+        sourcesList = [{
+          title: toolResult.verifiedTitle || 'Encyclopedic Reference',
+          url: toolResult.sourceUrl,
+          domain: 'wikipedia.org'
+        }];
+      }
+
+      // Stream second round for tool synthesis
+      try {
+        const secondStream = await ai.models.generateContentStream({
+          model: selectedModel,
+          contents: [
+            ...contents,
+            {
+              role: 'model',
+              parts: [{ functionCall: { name: call.name, args: call.args || {} } }]
+            },
+            {
+              role: 'user',
+              parts: [{ functionResponse: { name: call.name, response: toolResult } }]
+            }
+          ],
+          config: { systemInstruction }
+        });
+
+        for await (const secChunk of secondStream) {
+          if (secChunk.text) {
+            accumulatedReply += secChunk.text;
+            sendEvent({ type: 'token', delta: secChunk.text });
+          }
+        }
+      } catch (secErr) {
+        if (!accumulatedReply) {
+          const fallbackSummary = toolResult?.summary || (toolResult?.result ? `Result: ${toolResult.result}` : 'Tool execution complete.');
+          accumulatedReply = fallbackSummary;
+          sendEvent({ type: 'token', delta: fallbackSummary });
+        }
+      }
+    }
+
+    if (!accumulatedReply) {
+      accumulatedReply = 'Directive processed, sir.';
+      sendEvent({ type: 'token', delta: accumulatedReply });
+    }
+
+    sendEvent({
+      type: 'done',
+      reply: accumulatedReply,
+      sources: sourcesList.length > 0 ? sourcesList : undefined,
+      toolUsed: executedToolObj || undefined,
+      demoMode: false
+    });
+    return res.end();
+  } catch (streamErr: any) {
+    console.warn('Streaming pipeline fell back to tactical local engine:', streamErr?.message || streamErr);
+    const fallback = await fallbackJarvisResponse(prompt);
+    if (fallback.toolUsed) {
+      sendEvent({ type: 'tool', tool: fallback.toolUsed });
+    }
+    const words = fallback.reply.split(' ');
+    for (let i = 0; i < words.length; i++) {
+      sendEvent({ type: 'token', delta: (i > 0 ? ' ' : '') + words[i] });
+    }
+    sendEvent({
+      type: 'done',
+      reply: fallback.reply,
+      sources: fallback.sources,
+      toolUsed: fallback.toolUsed,
+      demoMode: true
+    });
+    return res.end();
+  }
+});
+
+// Non-streaming endpoint (retained for backward compatibility and fallback)
 app.post('/api/assistant/interact', async (req, res) => {
   const { prompt, history, style = 'concise' } = req.body;
 
@@ -917,6 +1855,10 @@ CURRENT DATE/TIME: ${new Date().toISOString()}`;
           manageTaskDeclaration,
           translateTextDeclaration,
           getSystemStatusDeclaration,
+          openApplicationDeclaration,
+          closeApplicationDeclaration,
+          openWebsiteDeclaration,
+          getRunningApplicationsDeclaration,
         ],
       },
     ];
@@ -1079,6 +2021,93 @@ CURRENT DATE/TIME: ${new Date().toISOString()}`;
       toolUsed: fallback.toolUsed,
       executionSteps: [...fallback.executionSteps, 'Notice: Tactical Local Engine Engaged'],
       demoMode: true
+    });
+  }
+});
+
+// Desktop Agent Control Endpoints (Secure Local Control Layer)
+const LOCAL_AGENT_URL = 'http://127.0.0.1:39281';
+const LOCAL_AGENT_AUTH = 'Bearer STARK-JARVIS-SECURE-LOCAL-KEY';
+
+app.get('/api/desktop/registry', (req, res) => {
+  res.json({
+    applications: APPLICATION_REGISTRY,
+    total: APPLICATION_REGISTRY.length,
+    securityNotice: 'Execution restricted strictly to authorized binary allowlist.'
+  });
+});
+
+app.get('/api/desktop/status', async (req, res) => {
+  try {
+    const response = await fetch(`${LOCAL_AGENT_URL}/status`, {
+      headers: { 'Authorization': LOCAL_AGENT_AUTH },
+      signal: AbortSignal.timeout(1200)
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return res.json({ connected: true, agent: data });
+    }
+    return res.json({ connected: false, error: `Agent responded with status ${response.status}` });
+  } catch (err: any) {
+    return res.json({
+      connected: false,
+      error: 'Desktop agent daemon is not currently responding on 127.0.0.1:39281'
+    });
+  }
+});
+
+app.get('/api/desktop/running-apps', async (req, res) => {
+  try {
+    const response = await fetch(`${LOCAL_AGENT_URL}/running-apps`, {
+      headers: { 'Authorization': LOCAL_AGENT_AUTH },
+      signal: AbortSignal.timeout(1500)
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return res.json(data);
+    }
+    return res.status(response.status).json({ error: 'Failed to fetch running apps from agent' });
+  } catch (err: any) {
+    return res.json({
+      runningApps: [],
+      error: 'Desktop agent daemon offline',
+      totalAllowed: APPLICATION_REGISTRY.length
+    });
+  }
+});
+
+app.post('/api/desktop/action', async (req, res) => {
+  const { action, target, confirmationToken } = req.body;
+  if (!action || !target) {
+    return res.status(400).json({ error: 'Action and target parameters required' });
+  }
+
+  // Validate against application registry
+  const appItem = APPLICATION_REGISTRY.find(a => a.id === target || a.name.toLowerCase() === target.toLowerCase());
+  if (!appItem) {
+    return res.status(403).json({
+      error: `Security violation: "${target}" is not present in the authorized application registry. Execution aborted.`
+    });
+  }
+
+  try {
+    const response = await fetch(`${LOCAL_AGENT_URL}/action`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': LOCAL_AGENT_AUTH
+      },
+      body: JSON.stringify({ action, target: appItem.id, confirmationToken }),
+      signal: AbortSignal.timeout(2500)
+    });
+
+    const data = await response.json();
+    return res.status(response.status).json(data);
+  } catch (err: any) {
+    return res.status(503).json({
+      success: false,
+      error: `Local desktop agent unreachable on ${LOCAL_AGENT_URL}. Please ensure desktop-agent.mjs daemon is active.`,
+      targetApp: appItem.name
     });
   }
 });

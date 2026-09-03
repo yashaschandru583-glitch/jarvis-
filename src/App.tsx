@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   AssistantState, 
   AssistantSettings, 
+  DesktopActionDetail,
+  DesktopAgentState,
   ExecutionStep, 
   Message, 
   StarkTask, 
@@ -9,26 +11,44 @@ import {
   ToolExecution 
 } from './types';
 import { ArcReactor } from './components/ArcReactor';
-import { MicController } from './components/MicController';
-import { HudOverlay } from './components/HudOverlay';
+import { ReactorHudSurround } from './components/ReactorHudSurround';
+import { CommandConsole } from './components/CommandConsole';
+import { ConversationTerminal } from './components/ConversationTerminal';
 import { HudTelemetry } from './components/HudTelemetry';
+import { JarvisTopBar } from './components/JarvisTopBar';
+import { JarvisLeftColumn } from './components/JarvisLeftColumn';
+import { JarvisRightColumn } from './components/JarvisRightColumn';
+import { JarvisCenterColumn } from './components/JarvisCenterColumn';
 import { ConversationHistoryModal } from './components/ConversationHistoryModal';
 import { SettingsModal } from './components/SettingsModal';
+import { SystemInfoModal } from './components/SystemInfoModal';
 import { TaskTrackerModal } from './components/TaskTrackerModal';
+import { DesktopAgentModal } from './components/DesktopAgentModal';
+import { RunningAppsModal } from './components/RunningAppsModal';
+import { BootSequence } from './components/BootSequence';
 import { soundFx } from './utils/audioSynthesizer';
+import { desktopAgent } from './utils/desktopAgentService';
 import { 
   startSpeechRecognition, 
   stopSpeechRecognition, 
   speakJarvis, 
-  stopJarvisSpeech 
+  stopJarvisSpeech,
+  streamingSpeaker 
 } from './utils/speech';
+import { ttsService } from './utils/ttsService';
 
 const DEFAULT_SETTINGS: AssistantSettings = {
   voiceEnabled: true,
-  voicePitch: 0.95,
-  voiceRate: 1.05,
-  voiceVolume: 1.0,
+  voicePitch: 0.90, // Low & deep mature resonance
+  voiceRate: 1.20, // Fast 1.20x cadence
+  voiceVolume: 0.80, // 80% volume
+  autoListen: false,
+  interruptOnSpeech: true,
+  streamingTts: true,
+  preferredVoice: '',
+  aiModel: 'gemini-3.6-flash',
   aiStyle: 'concise',
+  contextMemory: 10,
   reactorIntensity: 85,
   animationSpeed: 1.0,
   hudDensity: 'balanced',
@@ -47,6 +67,14 @@ export default function App() {
   const [activeTool, setActiveTool] = useState<ToolExecution | undefined>(undefined);
   const [tasks, setTasks] = useState<StarkTask[]>([]);
   
+  // Boot Sequence State (Section 11)
+  const [isBooting, setIsBooting] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return !sessionStorage.getItem('jarvis_booted');
+    }
+    return true;
+  });
+
   const [settings, setSettings] = useState<AssistantSettings>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('jarvis_settings');
@@ -66,7 +94,7 @@ export default function App() {
     frequencyHz: 60.02,
     batteryStatus: 'FUSION COUPLING (99.8%)',
     networkStatus: 'STARK SATELLITE 10 Gbps',
-    activeModel: 'gemini-3.7-flash',
+    activeModel: 'gemini-3.6-flash',
     demoMode: false,
   });
 
@@ -74,6 +102,47 @@ export default function App() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isTasksOpen, setIsTasksOpen] = useState(false);
+  const [isSystemInfoOpen, setIsSystemInfoOpen] = useState(false);
+  const [isDesktopModalOpen, setIsDesktopModalOpen] = useState(false);
+  const [isRunningAppsOpen, setIsRunningAppsOpen] = useState(false);
+
+  // Desktop Control Action HUD state
+  const [desktopAction, setDesktopAction] = useState<DesktopActionDetail | null>(null);
+  const [desktopAgentState, setDesktopAgentState] = useState<DesktopAgentState>(() => desktopAgent.getState());
+
+  // Listen to desktop agent connection and action lifecycle stages
+  useEffect(() => {
+    const unsubState = desktopAgent.subscribeState((newState) => {
+      setDesktopAgentState(newState);
+    });
+    const unsubAction = desktopAgent.subscribeAction((action) => {
+      setDesktopAction(action);
+      if (action.stage === 'success' || action.stage === 'failed') {
+        setTimeout(() => {
+          setDesktopAction((curr) => (curr?.id === action.id ? null : curr));
+        }, 4500);
+      }
+    });
+    desktopAgent.checkHealth();
+    return () => {
+      unsubState();
+      unsubAction();
+    };
+  }, []);
+
+  // Helper to dispatch desktop action lifecycle to HUD and local daemon
+  const dispatchDesktopActionFromTool = useCallback((tool: { name: string; args?: any; result?: any }) => {
+    if (tool.name === 'open_desktop_application') {
+      const targetName = tool.args?.applicationName || tool.result?.app || 'Application';
+      desktopAgent.openApp(targetName);
+    } else if (tool.name === 'close_desktop_application') {
+      const targetName = tool.args?.applicationName || tool.result?.app || 'Application';
+      desktopAgent.closeApp(targetName, true);
+    } else if (tool.name === 'open_website') {
+      const url = tool.args?.url || tool.result?.url || '';
+      desktopAgent.openWebsite(url);
+    }
+  }, []);
 
   // Sync settings to localStorage
   useEffect(() => {
@@ -104,6 +173,16 @@ export default function App() {
     fetchInitData();
   }, []);
 
+  const handleBootComplete = () => {
+    setIsBooting(false);
+    sessionStorage.setItem('jarvis_booted', 'true');
+    soundFx.playReactorCharge(settings.soundEffects);
+  };
+
+  const handleReplayBoot = () => {
+    setIsBooting(true);
+  };
+
   // Stop vocal and speech recognition
   const handleStop = useCallback(() => {
     stopSpeechRecognition();
@@ -114,11 +193,14 @@ export default function App() {
     soundFx.playClick(settings.soundEffects);
   }, [settings.soundEffects]);
 
-  // Process directive with Gemini server-side endpoint
+  // Process directive with ultra-low-latency streaming pipeline
   const processDirective = async (prompt: string) => {
     if (!prompt.trim()) return;
 
-    // Create User Message
+    // Interrupt any active voice playback immediately
+    stopJarvisSpeech();
+
+    // Create and display User Directive instantly
     const userMsg: Message = {
       id: `msg-${Date.now()}`,
       role: 'user',
@@ -129,147 +211,279 @@ export default function App() {
     setMessages((prev) => [...prev, userMsg]);
     setCurrentMessage(userMsg);
     setLiveTranscript('');
-    setState('understanding');
+    setState('thinking'); // Immediate processing state — 0ms delay!
     soundFx.playProcessingPulse(settings.soundEffects);
 
-    // Initial steps
     const initSteps: ExecutionStep[] = [
       { stage: 'listening', label: 'Captured Voice Input', timestamp: Date.now() },
-      { stage: 'understanding', label: 'Semantic & Intent Analysis', timestamp: Date.now() },
-      { stage: 'thinking', label: 'Accessing AI Neural Core', timestamp: Date.now() },
+      { stage: 'understanding', label: 'Semantic Directive Classification', timestamp: Date.now() },
+      { stage: 'thinking', label: 'Accessing Neural AI Stream', timestamp: Date.now() },
     ];
     setExecutionSteps(initSteps);
 
-    try {
-      // Transition from understanding to thinking/searching
-      await new Promise((r) => setTimeout(r, 250));
-      setState('thinking');
+    const assistantMsgId = `msg-${Date.now() + 1}`;
+    let accumulatedText = '';
+    let toolUsedData: ToolExecution | undefined = undefined;
+    let sourcesData: any[] | undefined = undefined;
+    let hasStartedVoice = false;
+    const aiStartTime = performance.now();
 
-      const res = await fetch('/api/assistant/interact', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt,
-          history: messages.slice(-6).map((m) => ({ role: m.role, content: m.content })),
-          style: settings.aiStyle,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`Server returned error ${res.status}`);
-      }
-
-      const data = await res.json();
-
-      // If tool was executed
-      if (data.toolUsed) {
-        setState('executing');
-        setActiveTool({
-          name: data.toolUsed.name,
-          displayName: data.toolUsed.name.replace(/_/g, ' ').toUpperCase(),
-          args: data.toolUsed.args,
-          result: data.toolUsed.result,
-          status: 'success',
-        });
-        soundFx.playProcessingPulse(settings.soundEffects);
-        await new Promise((r) => setTimeout(r, 450));
-
-        // Refresh tasks if manage_stark_task was run
-        if (data.toolUsed.name === 'manage_stark_task') {
-          fetch('/api/tasks')
-            .then((r) => r.json())
-            .then((d) => setTasks(d.tasks || []))
-            .catch(() => {});
-        }
-      }
-
-      // Generating response stage
-      setState('generating');
-      await new Promise((r) => setTimeout(r, 200));
-
-      // Success indicator
-      setState('success');
-      soundFx.playSuccess(settings.soundEffects);
-
-      const assistantMsg: Message = {
-        id: `msg-${Date.now() + 1}`,
-        role: 'assistant',
-        content: data.reply,
-        sources: data.sources || data.toolUsed?.result?.sources,
-        timestamp: Date.now(),
-        toolExecution: data.toolUsed ? {
-          name: data.toolUsed.name,
-          displayName: data.toolUsed.name.replace(/_/g, ' ').toUpperCase(),
-          args: data.toolUsed.args,
-          result: data.toolUsed.result,
-          status: 'success',
-        } : undefined,
-      };
-
-      setMessages((prev) => [...prev, assistantMsg]);
-      setCurrentMessage(assistantMsg);
-
-      // Completed stage step
-      setExecutionSteps((prev) => [
-        ...prev,
-        { stage: 'completed', label: 'Protocol Completed', timestamp: Date.now() },
-      ]);
-
-      // Speak response if enabled
-      if (settings.voiceEnabled) {
-        setState('speaking');
-        speakJarvis(data.reply, {
+    // Prepare streaming speech engine
+    if (settings.voiceEnabled) {
+      streamingSpeaker.start(
+        {
           pitch: settings.voicePitch,
           rate: settings.voiceRate,
           volume: settings.voiceVolume,
           preferredVoice: settings.preferredVoice,
+          onStart: () => {
+            setState('speaking');
+          },
           onAudioLevel: (lvl) => setAudioLevel(lvl),
+          onInterrupted: () => {
+            setState('interrupted');
+            setAudioLevel(0);
+          },
           onEnd: () => {
             setState('idle');
             setAudioLevel(0);
+            if (settings.autoListen) {
+              handleActivateMic();
+            }
           },
-        });
-      } else {
-        setTimeout(() => {
-          setState('idle');
-          setAudioLevel(0);
-        }, 1200);
+        },
+        aiStartTime
+      );
+    }
+
+    try {
+      const memoryLimit = settings.contextMemory || 10;
+      const res = await fetch('/api/assistant/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          history: messages.slice(-memoryLimit).map((m) => ({ role: m.role, content: m.content })),
+          style: settings.aiStyle,
+        }),
+      });
+
+      if (!res.ok || !res.body) {
+        throw new Error(`Server returned stream error: ${res.status}`);
       }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+
+        for (const chunk of parts) {
+          const lines = chunk.split('\n');
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const payload = line.slice(6).trim();
+            if (!payload) continue;
+
+            try {
+              const event = JSON.parse(payload);
+
+              if (event.type === 'token' && typeof event.delta === 'string') {
+                accumulatedText += event.delta;
+
+                // Immediate switch to speaking state on first token arrival
+                if (!hasStartedVoice) {
+                  hasStartedVoice = true;
+                  const firstTokenTime = performance.now();
+                  const aiLatency = parseFloat(((firstTokenTime - aiStartTime) / 1000).toFixed(2));
+                  ttsService.setMetrics({
+                    aiFirstTokenLatency: Math.max(0.05, aiLatency),
+                    aiResponseTime: Math.max(0.05, aiLatency),
+                  });
+                  setState('speaking');
+                  soundFx.playProcessingPulse(settings.soundEffects);
+                }
+
+                // Progressive UI display
+                const progressiveMsg: Message = {
+                  id: assistantMsgId,
+                  role: 'assistant',
+                  content: accumulatedText,
+                  sources: sourcesData,
+                  toolExecution: toolUsedData,
+                  timestamp: Date.now(),
+                };
+                setCurrentMessage(progressiveMsg);
+
+                // Progressive Text-to-Speech token feeding
+                if (settings.voiceEnabled) {
+                  streamingSpeaker.pushToken(event.delta);
+                }
+              } else if (event.type === 'tool' && event.tool) {
+                toolUsedData = {
+                  name: event.tool.name,
+                  displayName: event.tool.name.replace(/_/g, ' ').toUpperCase(),
+                  args: event.tool.args,
+                  result: event.tool.result,
+                  status: 'success',
+                };
+                setActiveTool(toolUsedData);
+
+                // Dispatch desktop application/website control if tool matches
+                dispatchDesktopActionFromTool(event.tool);
+
+                if (event.tool.name === 'manage_stark_task') {
+                  fetch('/api/tasks')
+                    .then((r) => r.json())
+                    .then((d) => setTasks(d.tasks || []))
+                    .catch(() => {});
+                }
+              } else if (event.type === 'step' && event.step) {
+                setExecutionSteps((prev) => [
+                  ...prev,
+                  { stage: 'thinking', label: event.step, timestamp: Date.now() },
+                ]);
+              } else if (event.type === 'done') {
+                if (event.reply && !accumulatedText) {
+                  accumulatedText = event.reply;
+                }
+                if (event.sources) sourcesData = event.sources;
+                if (event.toolUsed && !toolUsedData) {
+                  toolUsedData = {
+                    name: event.toolUsed.name,
+                    displayName: event.toolUsed.name.replace(/_/g, ' ').toUpperCase(),
+                    args: event.toolUsed.args,
+                    result: event.toolUsed.result,
+                    status: 'success',
+                  };
+                  setActiveTool(toolUsedData);
+                  dispatchDesktopActionFromTool(event.toolUsed);
+                }
+              }
+            } catch (pErr) {
+              console.warn('Stream chunk parse error:', pErr);
+            }
+          }
+        }
+      }
+
+      // Finish streaming TTS chunk queue
+      if (settings.voiceEnabled) {
+        streamingSpeaker.finishStream();
+      } else {
+        setState('idle');
+      }
+
+      const finalAssistantMsg: Message = {
+        id: assistantMsgId,
+        role: 'assistant',
+        content: accumulatedText || 'Directive executed, sir.',
+        sources: sourcesData,
+        toolExecution: toolUsedData,
+        timestamp: Date.now(),
+      };
+
+      setMessages((prev) => [...prev, finalAssistantMsg]);
+      setCurrentMessage(finalAssistantMsg);
+
+      setExecutionSteps((prev) => [
+        ...prev,
+        { stage: 'completed', label: 'Protocol Completed', timestamp: Date.now() },
+      ]);
     } catch (err: any) {
-      console.error('Directive execution error:', err);
+      console.warn('Streaming failed, invoking standard assistant endpoint:', err);
+      // Fallback to non-streaming endpoint if SSE stream fails
+      try {
+        const fbRes = await fetch('/api/assistant/interact', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt,
+            history: messages.slice(-4).map((m) => ({ role: m.role, content: m.content })),
+            style: settings.aiStyle,
+          }),
+        });
+
+        if (fbRes.ok) {
+          const fbData = await fbRes.json();
+          const fallbackMsg: Message = {
+            id: assistantMsgId,
+            role: 'assistant',
+            content: fbData.reply,
+            sources: fbData.sources,
+            toolExecution: fbData.toolUsed ? {
+              name: fbData.toolUsed.name,
+              displayName: fbData.toolUsed.name.replace(/_/g, ' ').toUpperCase(),
+              args: fbData.toolUsed.args,
+              result: fbData.toolUsed.result,
+              status: 'success',
+            } : undefined,
+            timestamp: Date.now(),
+          };
+
+          setMessages((prev) => [...prev, fallbackMsg]);
+          setCurrentMessage(fallbackMsg);
+
+          if (fbData.toolUsed) {
+            dispatchDesktopActionFromTool(fbData.toolUsed);
+          }
+
+          if (settings.voiceEnabled) {
+            setState('speaking');
+            speakJarvis(fbData.reply, {
+              pitch: settings.voicePitch,
+              rate: settings.voiceRate,
+              volume: settings.voiceVolume,
+              preferredVoice: settings.preferredVoice,
+              onAudioLevel: (lvl) => setAudioLevel(lvl),
+              onEnd: () => {
+                setState('idle');
+                setAudioLevel(0);
+              },
+            });
+          } else {
+            setState('idle');
+          }
+          return;
+        }
+      } catch (_) {}
+
       setState('error');
       soundFx.playError(settings.soundEffects);
-
       const errorMsg: Message = {
-        id: `msg-${Date.now() + 1}`,
+        id: assistantMsgId,
         role: 'assistant',
         content: `My apologies, sir. An anomaly occurred in the execution matrix: ${err.message || 'Unknown exception'}.`,
         timestamp: Date.now(),
       };
-
       setMessages((prev) => [...prev, errorMsg]);
       setCurrentMessage(errorMsg);
-
-      if (settings.voiceEnabled) {
-        setState('speaking');
-        speakJarvis(errorMsg.content, {
-          pitch: settings.voicePitch,
-          rate: settings.voiceRate,
-          volume: settings.voiceVolume,
-          onAudioLevel: (lvl) => setAudioLevel(lvl),
-          onEnd: () => {
-            setState('idle');
-            setAudioLevel(0);
-          },
-        });
-      } else {
-        setTimeout(() => setState('idle'), 2000);
-      }
+      setTimeout(() => setState('idle'), 1000);
     }
   };
 
-  // Activate microphone listening
+  // Activate microphone listening with instant playback interruption
   const handleActivateMic = () => {
+    ttsService.unlockAudioContext();
+    if (state === 'speaking' || ttsService.getMetrics().voiceActive) {
+      // Immediate zero-delay interruption protocol
+      ttsService.interrupt();
+      setState('interrupted');
+      setAudioLevel(0);
+      soundFx.playClick(settings.soundEffects);
+      armMicrophone();
+      return;
+    }
+    armMicrophone();
+  };
+
+  const armMicrophone = () => {
     handleStop();
     soundFx.playReactorCharge(settings.soundEffects);
     setState('listening');
@@ -307,7 +521,7 @@ export default function App() {
   // Keyboard shortcut: Space to activate voice when not in an input
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && e.target === document.body) {
+      if (e.code === 'Space' && (e.target === document.body || (e.target as HTMLElement).tagName === 'BODY')) {
         e.preventDefault();
         if (state === 'idle') {
           handleActivateMic();
@@ -376,78 +590,76 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen w-full flex flex-col justify-between relative overflow-x-hidden scanlines">
-      {/* Background Arc Energy Flare Overlay */}
+    <div className="min-h-screen w-full flex flex-col justify-between relative overflow-x-hidden bg-[#020408] text-cyan-400 select-none scanlines">
+      {/* System Boot Sequence Modal (Section 11) */}
+      {isBooting && <BootSequence onComplete={handleBootComplete} />}
+
+      {/* Background Arc Energy Field Gradient & Grid */}
       <div className="fixed inset-0 pointer-events-none z-0">
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[700px] rounded-full bg-cyan-500/5 blur-[120px]" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] rounded-full bg-[radial-gradient(circle,rgba(0,240,255,0.08)_0%,rgba(8,145,178,0.03)_50%,transparent_75%)] blur-[100px]" />
+        <div className="absolute inset-0 hex-bg" />
       </div>
 
-      {/* TOP HEADER HUD TELEMETRY */}
-      <HudTelemetry
-        state={state}
-        telemetry={telemetry}
-        soundEnabled={settings.soundEffects}
-        onToggleSound={() => setSettings((s) => ({ ...s, soundEffects: !s.soundEffects }))}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        onOpenHistory={() => setIsHistoryOpen(true)}
-        onOpenTasks={() => setIsTasksOpen(true)}
-        density={settings.hudDensity}
-      />
+      {/* TOP HEADER: < JARVIS OS > v7.2.1 | JARVIS AI SYSTEM ONLINE | 10:01:13 PM SATURDAY */}
+      <JarvisTopBar onOpenSettings={() => setIsSettingsOpen(true)} />
 
-      {/* MAIN CENTERPIECE: THE ARC REACTOR & HOLOGRAPHIC HUD */}
-      <main className="flex-1 flex flex-col items-center justify-center p-3 sm:p-6 relative z-10 gap-3 sm:gap-5 w-full max-w-5xl mx-auto my-auto">
-        {/* Centerpiece Mechanical Arc Reactor */}
-        <ArcReactor
-          state={state}
-          audioLevel={audioLevel}
-          onClick={handleActivateMic}
-          intensity={settings.reactorIntensity}
-          animationSpeed={settings.animationSpeed}
-          activeActionLabel={activeTool?.displayName}
-          reducedMotion={settings.reducedMotion}
-        />
+      {/* 3-COLUMN MAIN HUD INTERFACE MATCHING SCREENSHOT */}
+      <div className="flex-1 w-full max-w-[1560px] mx-auto p-2 sm:p-3.5 relative z-10">
+        {/* Futuristic Outer Tech Boundary Line & Corner Brackets */}
+        <div className="relative w-full h-full p-2 sm:p-3 rounded-lg border border-cyan-500/20 bg-[#020612]/70 backdrop-blur-md shadow-[0_0_30px_rgba(0,240,255,0.03)]">
+          <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-cyan-400 pointer-events-none" />
+          <div className="absolute top-0 right-0 w-3 h-3 border-t-2 border-r-2 border-cyan-400 pointer-events-none" />
+          <div className="absolute bottom-0 left-0 w-3 h-3 border-b-2 border-l-2 border-cyan-400 pointer-events-none" />
+          <div className="absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 border-cyan-400 pointer-events-none" />
 
-        {/* Dynamic Holographic Dialogue HUD Overlay */}
-        <HudOverlay
-          state={state}
-          currentMessage={currentMessage}
-          liveTranscript={liveTranscript}
-          executionSteps={executionSteps}
-          activeTool={activeTool}
-        />
+          {/* Grid Layout: Left Column (Widgets), Center Column (Arc Reactor & Command Feed), Right Column (Status & Apps) */}
+          <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] xl:grid-cols-[310px_1fr_310px] 2xl:grid-cols-[330px_1fr_330px] gap-3 lg:gap-4 items-start">
+            {/* LEFT COLUMN */}
+            <div className="flex justify-center w-full">
+              <JarvisLeftColumn
+                state={state}
+                audioLevel={audioLevel}
+                onOpenTasks={() => setIsTasksOpen(true)}
+                onOpenHistory={() => setIsHistoryOpen(true)}
+                onOpenSystemInfo={() => setIsSystemInfoOpen(true)}
+                onOpenSettings={() => setIsSettingsOpen(true)}
+                onToggleMic={handleActivateMic}
+              />
+            </div>
 
-        {/* Microphone Controller & Directive Dispatcher */}
-        <MicController
-          state={state}
-          onActivateMic={handleActivateMic}
-          onStop={handleStop}
-          onSubmitText={processDirective}
-          disabled={false}
-        />
-      </main>
+            {/* CENTER COLUMN: ARC REACTOR, MODE PILLS, ENTER COMMAND BOX, COMMAND FEED */}
+            <div className="flex justify-center w-full">
+              <JarvisCenterColumn
+                state={state}
+                audioLevel={audioLevel}
+                messages={messages}
+                currentMessage={currentMessage}
+                activeTool={activeTool}
+                desktopAction={desktopAction}
+                liveTranscript={liveTranscript}
+                onActivateMic={handleActivateMic}
+                onStop={handleStop}
+                onSubmitText={processDirective}
+                onSelectState={(s) => setState(s)}
+                reactorIntensity={settings.reactorIntensity}
+                animationSpeed={settings.animationSpeed}
+                reducedMotion={settings.reducedMotion}
+              />
+            </div>
 
-      {/* FOOTER HUD STATUS BAR */}
-      <footer className="w-full max-w-7xl mx-auto px-4 py-2.5 flex items-center justify-between border-t border-cyan-500/20 bg-[#02040a]/85 text-[10px] font-mono-tech text-cyan-500/80 z-20">
-        <div className="flex items-center gap-3">
-          <span className="flex items-center gap-1.5 text-cyan-300">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            S.H.I.E.L.D. ENCRYPTED TERMINAL // ID: 884-JVS
-          </span>
-          <span className="hidden sm:inline text-cyan-600">|</span>
-          <span className="hidden sm:inline">ARC FUSION: 12.4 GW</span>
-          <span className="hidden md:inline text-cyan-600">|</span>
-          <span className="hidden md:inline">QUANTUM ENCRYPTION: ACTIVE</span>
+            {/* RIGHT COLUMN */}
+            <div className="flex justify-center w-full">
+              <JarvisRightColumn
+                onOpenRunningApps={() => setIsRunningAppsOpen(true)}
+                onOpenSystemInfo={() => setIsSystemInfoOpen(true)}
+              />
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="hidden sm:inline text-cyan-500/70">JARVIS CLOUD COMPUTE // NODE: 14-B</span>
-          <span className="text-cyan-300 font-bold flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-            ONLINE
-          </span>
-        </div>
-      </footer>
+      </div>
 
-      {/* MODALS */}
+      {/* MODALS & PANELS */}
+      {/* 1. Mission History Logs */}
       <ConversationHistoryModal
         isOpen={isHistoryOpen}
         onClose={() => setIsHistoryOpen(false)}
@@ -455,14 +667,24 @@ export default function App() {
         onClearHistory={handleClearHistory}
       />
 
+      {/* 2. Slide-out Settings Drawer (Section 10) */}
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         settings={settings}
-        onUpdateSettings={setSettings}
-        onClearData={handleClearHistory}
+        onSaveSettings={setSettings}
+        telemetry={telemetry}
       />
 
+      {/* 3. System Telemetry & Diagnostics Modal */}
+      <SystemInfoModal
+        isOpen={isSystemInfoOpen}
+        onClose={() => setIsSystemInfoOpen(false)}
+        telemetry={telemetry}
+        onReplayBoot={handleReplayBoot}
+      />
+
+      {/* 4. Stark Task Protocol Tracker */}
       <TaskTrackerModal
         isOpen={isTasksOpen}
         onClose={() => setIsTasksOpen(false)}
@@ -470,6 +692,24 @@ export default function App() {
         onAddTask={handleAddTask}
         onToggleTask={handleToggleTask}
         onDeleteTask={handleDeleteTask}
+      />
+
+      {/* 5. Desktop Control Agent Configuration Modal */}
+      <DesktopAgentModal
+        isOpen={isDesktopModalOpen}
+        onClose={() => setIsDesktopModalOpen(false)}
+      />
+
+      {/* 6. Running OS Applications Monitor Modal */}
+      <RunningAppsModal
+        isOpen={isRunningAppsOpen}
+        onClose={() => setIsRunningAppsOpen(false)}
+        onOpenAgentSetup={() => {
+          setIsRunningAppsOpen(false);
+          setIsDesktopModalOpen(true);
+        }}
+        onLaunchApp={(appId) => desktopAgent.openApp(appId)}
+        onRequestCloseApp={(appId) => desktopAgent.closeApp(appId, true)}
       />
     </div>
   );
