@@ -17,11 +17,6 @@ import {
   ToolExecution,
 } from './types';
 
-import { ArcReactor } from './components/ArcReactor';
-import { ReactorHudSurround } from './components/ReactorHudSurround';
-import { CommandConsole } from './components/CommandConsole';
-import { ConversationTerminal } from './components/ConversationTerminal';
-import { HudTelemetry } from './components/HudTelemetry';
 import { JarvisTopBar } from './components/JarvisTopBar';
 import { JarvisLeftColumn } from './components/JarvisLeftColumn';
 import { JarvisRightColumn } from './components/JarvisRightColumn';
@@ -48,71 +43,12 @@ import {
 import { ttsService } from './utils/ttsService';
 
 /* =========================================================
-   J.A.R.V.I.S. BACKEND CONFIGURATION
+   BACKEND URL
    ========================================================= */
-
-/*
- * GitHub Pages hosts the frontend.
- * Render hosts the Node/Express backend.
- *
- * GitHub Actions will inject VITE_API_BASE_URL during build.
- *
- * Example:
- * VITE_API_BASE_URL=https://jarvis-backend.onrender.com
- *
- * Local development automatically uses same-origin/local
- * requests when no environment variable is configured.
- */
 
 const API_BASE = (
   import.meta.env.VITE_API_BASE_URL || ''
 ).replace(/\/+$/, '');
-
-/* =========================================================
-   DEFAULT SETTINGS
-   ========================================================= */
-
-const DEFAULT_SETTINGS: AssistantSettings = {
-  voiceEnabled: true,
-
-  // Deep mature voice configuration
-  voicePitch: 0.90,
-
-  // Fast voice cadence
-  voiceRate: 1.20,
-
-  voiceVolume: 1.0,
-
-  autoListen: false,
-
-  interruptOnSpeech: true,
-
-  streamingTts: true,
-
-  preferredVoice: '',
-
-  aiModel: 'gemini-2.5-flash',
-
-  aiStyle: 'concise',
-
-  contextMemory: 10,
-
-  reactorIntensity: 85,
-
-  animationSpeed: 1.0,
-
-  hudDensity: 'balanced',
-
-  soundEffects: true,
-
-  ambientHum: false,
-
-  reducedMotion: false,
-};
-
-/* =========================================================
-   API HELPER
-   ========================================================= */
 
 function apiUrl(path: string): string {
   if (!path.startsWith('/')) {
@@ -123,14 +59,34 @@ function apiUrl(path: string): string {
 }
 
 /* =========================================================
-   MAIN APP
+   DEFAULT SETTINGS
+   ========================================================= */
+
+const DEFAULT_SETTINGS: AssistantSettings = {
+  voiceEnabled: true,
+  voicePitch: 0.90,
+  voiceRate: 1.20,
+  voiceVolume: 1.0,
+  autoListen: false,
+  interruptOnSpeech: true,
+  streamingTts: true,
+  preferredVoice: '',
+  aiModel: 'gemini-2.5-flash',
+  aiStyle: 'concise',
+  contextMemory: 10,
+  reactorIntensity: 85,
+  animationSpeed: 1.0,
+  hudDensity: 'balanced',
+  soundEffects: true,
+  ambientHum: false,
+  reducedMotion: false,
+};
+
+/* =========================================================
+   APP
    ========================================================= */
 
 export default function App() {
-  /* -------------------------------------------------------
-     CORE ASSISTANT STATE
-     ------------------------------------------------------- */
-
   const [state, setState] =
     useState<AssistantState>('idle');
 
@@ -157,9 +113,9 @@ export default function App() {
   const [tasks, setTasks] =
     useState<StarkTask[]>([]);
 
-  /* -------------------------------------------------------
-     BOOT SEQUENCE
-     ------------------------------------------------------- */
+  /* =========================================================
+     BOOT
+     ========================================================= */
 
   const [isBooting, setIsBooting] =
     useState<boolean>(() => {
@@ -172,9 +128,9 @@ export default function App() {
       return true;
     });
 
-  /* -------------------------------------------------------
+  /* =========================================================
      SETTINGS
-     ------------------------------------------------------- */
+     ========================================================= */
 
   const [settings, setSettings] =
     useState<AssistantSettings>(() => {
@@ -190,16 +146,18 @@ export default function App() {
               ...DEFAULT_SETTINGS,
               ...JSON.parse(saved),
             };
-          } catch (_) {}
+          } catch {
+            return DEFAULT_SETTINGS;
+          }
         }
       }
 
       return DEFAULT_SETTINGS;
     });
 
-  /* -------------------------------------------------------
+  /* =========================================================
      TELEMETRY
-     ------------------------------------------------------- */
+     ========================================================= */
 
   const [telemetry, setTelemetry] =
     useState<SystemTelemetry>({
@@ -216,9 +174,9 @@ export default function App() {
       demoMode: false,
     });
 
-  /* -------------------------------------------------------
+  /* =========================================================
      MODALS
-     ------------------------------------------------------- */
+     ========================================================= */
 
   const [isHistoryOpen, setIsHistoryOpen] =
     useState(false);
@@ -241,9 +199,9 @@ export default function App() {
   const [isAutoplayBlocked, setIsAutoplayBlocked] =
     useState(false);
 
-  /* -------------------------------------------------------
+  /* =========================================================
      DESKTOP AGENT
-     ------------------------------------------------------- */
+     ========================================================= */
 
   const [desktopAction, setDesktopAction] =
     useState<DesktopActionDetail | null>(null);
@@ -254,73 +212,75 @@ export default function App() {
     );
 
   /* =========================================================
-     TTS AUTOPLAY / AUDIO UNLOCK
+     AUDIO UNLOCK
      ========================================================= */
 
   useEffect(() => {
-    const unsub =
+    const unsubscribe =
       ttsService.subscribeAutoplayBlocked(
         (blocked) => {
           setIsAutoplayBlocked(blocked);
         }
       );
 
-    const handleUserInteraction = () => {
+    const unlockAudio = () => {
       ttsService.unlockAudioContext();
       setIsAutoplayBlocked(false);
     };
 
     window.addEventListener(
       'click',
-      handleUserInteraction,
+      unlockAudio,
       { passive: true }
     );
 
     window.addEventListener(
       'touchstart',
-      handleUserInteraction,
+      unlockAudio,
       { passive: true }
     );
 
     window.addEventListener(
       'keydown',
-      handleUserInteraction,
+      unlockAudio,
       { passive: true }
     );
 
     return () => {
-      unsub();
+      unsubscribe();
 
       window.removeEventListener(
         'click',
-        handleUserInteraction
+        unlockAudio
       );
 
       window.removeEventListener(
         'touchstart',
-        handleUserInteraction
+        unlockAudio
       );
 
       window.removeEventListener(
         'keydown',
-        handleUserInteraction
+        unlockAudio
       );
     };
   }, []);
 
   /* =========================================================
-     DESKTOP AGENT STATE
+     DESKTOP AGENT EVENTS
      ========================================================= */
 
   useEffect(() => {
-    const unsubState =
+    const unsubscribeState =
       desktopAgent.subscribeState(
         (newState) => {
-          setDesktopAgentState(newState);
+          setDesktopAgentState(
+            newState
+          );
         }
       );
 
-    const unsubAction =
+    const unsubscribeAction =
       desktopAgent.subscribeAction(
         (action) => {
           setDesktopAction(action);
@@ -331,10 +291,10 @@ export default function App() {
           ) {
             setTimeout(() => {
               setDesktopAction(
-                (curr) =>
-                  curr?.id === action.id
+                (current) =>
+                  current?.id === action.id
                     ? null
-                    : curr
+                    : current
               );
             }, 4500);
           }
@@ -344,8 +304,8 @@ export default function App() {
     desktopAgent.checkHealth();
 
     return () => {
-      unsubState();
-      unsubAction();
+      unsubscribeState();
+      unsubscribeAction();
     };
   }, []);
 
@@ -364,29 +324,38 @@ export default function App() {
           tool.name ===
           'open_desktop_application'
         ) {
-          const targetName =
+          const appName =
             tool.args?.applicationName ||
             tool.result?.app ||
             'Application';
 
           desktopAgent.openApp(
-            targetName
+            appName
           );
-        } else if (
+
+          return;
+        }
+
+        if (
           tool.name ===
           'close_desktop_application'
         ) {
-          const targetName =
+          const appName =
             tool.args?.applicationName ||
             tool.result?.app ||
             'Application';
 
           desktopAgent.closeApp(
-            targetName,
+            appName,
             true
           );
-        } else if (
-          tool.name === 'open_website'
+
+          return;
+        }
+
+        if (
+          tool.name ===
+          'open_website'
         ) {
           const url =
             tool.args?.url ||
@@ -408,10 +377,14 @@ export default function App() {
      ========================================================= */
 
   useEffect(() => {
-    localStorage.setItem(
-      'jarvis_settings',
-      JSON.stringify(settings)
-    );
+    try {
+      localStorage.setItem(
+        'jarvis_settings',
+        JSON.stringify(settings)
+      );
+    } catch {
+      // Ignore localStorage errors
+    }
 
     soundFx.setAmbientHum(
       settings.ambientHum &&
@@ -420,55 +393,66 @@ export default function App() {
   }, [settings, state]);
 
   /* =========================================================
-     INITIAL TELEMETRY + TASKS
+     LOAD INITIAL DATA
      ========================================================= */
 
   useEffect(() => {
-    const fetchInitData =
-      async () => {
-        try {
-          const [
-            telRes,
-            taskRes,
-          ] = await Promise.all([
-            fetch(
-              apiUrl(
-                '/api/system/telemetry'
-              )
-            ),
-            fetch(
-              apiUrl('/api/tasks')
-            ),
-          ]);
+    let cancelled = false;
 
-          if (telRes.ok) {
-            const telData =
-              await telRes.json();
+    async function loadData() {
+      try {
+        const [
+          telemetryResponse,
+          tasksResponse,
+        ] = await Promise.all([
+          fetch(
+            apiUrl(
+              '/api/system/telemetry'
+            )
+          ),
+          fetch(
+            apiUrl('/api/tasks')
+          ),
+        ]);
 
-            setTelemetry(telData);
-          }
+        if (
+          !cancelled &&
+          telemetryResponse.ok
+        ) {
+          const data =
+            await telemetryResponse.json();
 
-          if (taskRes.ok) {
-            const taskData =
-              await taskRes.json();
+          setTelemetry(data);
+        }
 
-            setTasks(
-              taskData.tasks || []
-            );
-          }
-        } catch (err) {
-          console.warn(
-            'Init fetch error:',
-            err
+        if (
+          !cancelled &&
+          tasksResponse.ok
+        ) {
+          const data =
+            await tasksResponse.json();
+
+          setTasks(
+            data.tasks || []
           );
         }
-      };
+      } catch (error) {
+        console.warn(
+          'Initial API error:',
+          error
+        );
+      }
+    }
 
-    fetchInitData();
+    loadData();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   /* =========================================================
-     BOOT
+     BOOT HANDLERS
      ========================================================= */
 
   const handleBootComplete =
@@ -487,15 +471,19 @@ export default function App() {
 
   const handleReplayBoot =
     () => {
+      sessionStorage.removeItem(
+        'jarvis_booted'
+      );
+
       setIsBooting(true);
     };
 
   /* =========================================================
-     REQUEST LOCKING
+     REQUEST CONTROL
      ========================================================= */
 
   const isProcessingRef =
-    useRef<boolean>(false);
+    useRef(false);
 
   const activePromptNormalizedRef =
     useRef<string | null>(null);
@@ -509,10 +497,10 @@ export default function App() {
     );
 
   const lastSubmittedTranscriptRef =
-    useRef<string>('');
+    useRef('');
 
   const lastSubmittedTimeRef =
-    useRef<number>(0);
+    useRef(0);
 
   /* =========================================================
      STOP EVERYTHING
@@ -558,11 +546,268 @@ export default function App() {
     ]);
 
   /* =========================================================
+     FALLBACK API
+     ========================================================= */
+
+  const runFallbackRequest =
+    async (
+      requestId: string,
+      assistantMessageId: string,
+      prompt: string,
+      abortController: AbortController
+    ): Promise<boolean> => {
+      try {
+        const response =
+          await fetch(
+            apiUrl(
+              '/api/assistant/interact'
+            ),
+            {
+              method: 'POST',
+
+              headers: {
+                'Content-Type':
+                  'application/json',
+              },
+
+              body: JSON.stringify({
+                requestId,
+
+                prompt,
+
+                history:
+                  messages
+                    .slice(-4)
+                    .map(
+                      (message) => ({
+                        role:
+                          message.role,
+                        content:
+                          message.content,
+                      })
+                    ),
+
+                style:
+                  settings.aiStyle,
+              }),
+
+              signal:
+                abortController.signal,
+            }
+          );
+
+        if (
+          !response.ok
+        ) {
+          return false;
+        }
+
+        if (
+          activeRequestIdRef.current !==
+          requestId
+        ) {
+          return false;
+        }
+
+        const data =
+          await response.json();
+
+        const reply =
+          data.reply ||
+          'Directive processed, sir.';
+
+        const message:
+          Message = {
+          id:
+            assistantMessageId,
+
+          role:
+            'assistant',
+
+          content:
+            reply,
+
+          sources:
+            data.sources,
+
+          toolExecution:
+            data.toolUsed
+              ? {
+                  name:
+                    data.toolUsed
+                      .name,
+
+                  displayName:
+                    data.toolUsed
+                      .name
+                      .replace(
+                        /_/g,
+                        ' '
+                      )
+                      .toUpperCase(),
+
+                  args:
+                    data.toolUsed
+                      .args,
+
+                  result:
+                    data.toolUsed
+                      .result,
+
+                  status:
+                    'success',
+                }
+              : undefined,
+
+          timestamp:
+            Date.now(),
+        };
+
+        setMessages(
+          (previous) => {
+            const index =
+              previous.findIndex(
+                (item) =>
+                  item.id ===
+                  assistantMessageId
+              );
+
+            if (index >= 0) {
+              const updated =
+                [...previous];
+
+              updated[index] =
+                message;
+
+              return updated;
+            }
+
+            return [
+              ...previous,
+              message,
+            ];
+          }
+        );
+
+        setCurrentMessage(
+          null
+        );
+
+        if (
+          data.toolUsed
+        ) {
+          setActiveTool({
+            name:
+              data.toolUsed
+                .name,
+
+            displayName:
+              data.toolUsed
+                .name
+                .replace(
+                  /_/g,
+                  ' '
+                )
+                .toUpperCase(),
+
+            args:
+              data.toolUsed
+                .args,
+
+            result:
+              data.toolUsed
+                .result,
+
+            status:
+              'success',
+          });
+
+          dispatchDesktopActionFromTool(
+            data.toolUsed
+          );
+        }
+
+        if (
+          settings.voiceEnabled
+        ) {
+          setState(
+            'speaking'
+          );
+
+          speakJarvis(
+            reply,
+            {
+              pitch:
+                settings.voicePitch,
+
+              rate:
+                settings.voiceRate,
+
+              volume:
+                settings.voiceVolume,
+
+              preferredVoice:
+                settings.preferredVoice,
+
+              onAudioLevel:
+                (level) => {
+                  if (
+                    activeRequestIdRef.current ===
+                    requestId
+                  ) {
+                    setAudioLevel(
+                      level
+                    );
+                  }
+                },
+
+              onEnd: () => {
+                if (
+                  activeRequestIdRef.current ===
+                  requestId
+                ) {
+                  setState(
+                    'idle'
+                  );
+
+                  setAudioLevel(
+                    0
+                  );
+                }
+              },
+            },
+            requestId
+          );
+        } else {
+          setState('idle');
+        }
+
+        return true;
+      } catch (error: any) {
+        if (
+          error?.name ===
+          'AbortError'
+        ) {
+          return false;
+        }
+
+        console.warn(
+          'Fallback API error:',
+          error
+        );
+
+        return false;
+      }
+    };
+
+  /* =========================================================
      PROCESS DIRECTIVE
      ========================================================= */
 
   const processDirective =
-    async (prompt: string) => {
+    async (
+      prompt: string
+    ) => {
       const cleanPrompt =
         prompt.trim();
 
@@ -576,10 +821,11 @@ export default function App() {
           .replace(/\s+/g, ' ')
           .replace(/[.,!?]+$/, '');
 
-      const now = Date.now();
+      const now =
+        Date.now();
 
       /* -----------------------------------------------------
-         DUPLICATE TRANSCRIPT PROTECTION
+         DUPLICATE PROTECTION
          ----------------------------------------------------- */
 
       if (
@@ -590,14 +836,14 @@ export default function App() {
           3000
       ) {
         console.log(
-          `[JARVIS DEDUPLICATION] Duplicate directive ignored: "${cleanPrompt}"`
+          '[JARVIS] Duplicate directive ignored.'
         );
 
         return;
       }
 
       /* -----------------------------------------------------
-         REQUEST LOCK
+         SAME ACTIVE REQUEST
          ----------------------------------------------------- */
 
       if (
@@ -606,21 +852,19 @@ export default function App() {
           activePromptNormalizedRef.current
       ) {
         console.log(
-          '[JARVIS REQUEST LOCK] Duplicate request ignored.'
+          '[JARVIS] Active duplicate ignored.'
         );
 
         return;
       }
 
       /* -----------------------------------------------------
-         INTERRUPT ACTIVE REQUEST
+         INTERRUPT OLD REQUEST
          ----------------------------------------------------- */
 
-      if (isProcessingRef.current) {
-        console.log(
-          `[JARVIS INTERRUPT] New directive: "${cleanPrompt}"`
-        );
-
+      if (
+        isProcessingRef.current
+      ) {
         if (
           activeAbortControllerRef.current
         ) {
@@ -636,7 +880,7 @@ export default function App() {
       }
 
       /* -----------------------------------------------------
-         ACQUIRE LOCK
+         LOCK REQUEST
          ----------------------------------------------------- */
 
       lastSubmittedTranscriptRef.current =
@@ -656,25 +900,16 @@ export default function App() {
          ----------------------------------------------------- */
 
       const requestId =
-        typeof crypto !== 'undefined' &&
+        typeof crypto !==
+          'undefined' &&
         crypto.randomUUID
           ? crypto.randomUUID()
           : `req-${Date.now()}-${Math.random()
               .toString(36)
-              .slice(2, 9)}`;
+              .slice(2, 10)}`;
 
       activeRequestIdRef.current =
         requestId;
-
-      console.log(
-        `[JARVIS] REQUEST CREATED
-requestId: ${requestId}
-prompt: "${cleanPrompt}"`
-      );
-
-      /* -----------------------------------------------------
-         ABORT CONTROLLER
-         ----------------------------------------------------- */
 
       const abortController =
         new AbortController();
@@ -682,8 +917,12 @@ prompt: "${cleanPrompt}"`
       activeAbortControllerRef.current =
         abortController;
 
+      console.log(
+        `[JARVIS] REQUEST CREATED: ${requestId}`
+      );
+
       /* -----------------------------------------------------
-         STOP PREVIOUS AUDIO / RECOGNITION
+         STOP PREVIOUS AUDIO
          ----------------------------------------------------- */
 
       stopJarvisSpeech();
@@ -694,33 +933,87 @@ prompt: "${cleanPrompt}"`
          USER MESSAGE
          ----------------------------------------------------- */
 
-      const userMsgId =
+      const userMessageId =
         `user-${requestId}`;
 
-      const userMsg: Message = {
-        id: userMsgId,
-        role: 'user',
-        content: cleanPrompt,
-        timestamp: Date.now(),
+      const userMessage:
+        Message = {
+        id:
+          userMessageId,
+
+        role:
+          'user',
+
+        content:
+          cleanPrompt,
+
+        timestamp:
+          Date.now(),
       };
 
-      setMessages((prev) => {
-        if (
-          prev.some(
-            (m) =>
-              m.id === userMsgId
-          )
-        ) {
-          return prev;
-        }
+      setMessages(
+        (previous) => {
+          if (
+            previous.some(
+              (item) =>
+                item.id ===
+                userMessageId
+            )
+          ) {
+            return previous;
+          }
 
-        return [
-          ...prev,
-          userMsg,
-        ];
-      });
+          return [
+            ...previous,
+            userMessage,
+          ];
+        }
+      );
+
+      setCurrentMessage(
+        null
+      );
 
       setLiveTranscript('');
+
+      setActiveTool(
+        undefined
+      );
+
+      setExecutionSteps([
+        {
+          stage:
+            'listening',
+
+          label:
+            'Captured Voice Input',
+
+          timestamp:
+            Date.now(),
+        },
+
+        {
+          stage:
+            'understanding',
+
+          label:
+            'Semantic Directive Classification',
+
+          timestamp:
+            Date.now(),
+        },
+
+        {
+          stage:
+            'thinking',
+
+          label:
+            'Accessing Neural AI Stream',
+
+          timestamp:
+            Date.now(),
+        },
+      ]);
 
       setState('thinking');
 
@@ -729,43 +1022,14 @@ prompt: "${cleanPrompt}"`
       );
 
       /* -----------------------------------------------------
-         EXECUTION STEPS
+         RESPONSE DATA
          ----------------------------------------------------- */
 
-      const initSteps: ExecutionStep[] =
-        [
-          {
-            stage: 'listening',
-            label:
-              'Captured Voice Input',
-            timestamp: Date.now(),
-          },
-          {
-            stage: 'understanding',
-            label:
-              'Semantic Directive Classification',
-            timestamp: Date.now(),
-          },
-          {
-            stage: 'thinking',
-            label:
-              'Accessing Neural AI Stream',
-            timestamp: Date.now(),
-          },
-        ];
-
-      setExecutionSteps(
-        initSteps
-      );
-
-      /* -----------------------------------------------------
-         ASSISTANT MESSAGE
-         ----------------------------------------------------- */
-
-      const assistantMsgId =
+      const assistantMessageId =
         `asst-${requestId}`;
 
-      let accumulatedText = '';
+      let accumulatedText =
+        '';
 
       let toolUsedData:
         | ToolExecution
@@ -775,17 +1039,19 @@ prompt: "${cleanPrompt}"`
         | any[]
         | undefined;
 
-      let hasStartedVoice =
+      let firstTokenReceived =
         false;
 
       const aiStartTime =
         performance.now();
 
       /* -----------------------------------------------------
-         START STREAMING SPEAKER
+         START TTS STREAM
          ----------------------------------------------------- */
 
-      if (settings.voiceEnabled) {
+      if (
+        settings.voiceEnabled
+      ) {
         streamingSpeaker.start(
           {
             pitch:
@@ -805,102 +1071,68 @@ prompt: "${cleanPrompt}"`
                 activeRequestIdRef.current ===
                 requestId
               ) {
-                console.log(
-                  `[JARVIS] TTS STARTED
-requestId: ${requestId}`
-                );
-
                 setState(
                   'speaking'
                 );
               }
             },
 
-            onAudioLevel: (
-              lvl
-            ) => {
-              if (
-                activeRequestIdRef.current ===
-                requestId
-              ) {
-                setAudioLevel(
-                  lvl
-                );
-              }
-            },
+            onAudioLevel:
+              (level) => {
+                if (
+                  activeRequestIdRef.current ===
+                  requestId
+                ) {
+                  setAudioLevel(
+                    level
+                  );
+                }
+              },
 
-            onInterrupted: () => {
-              if (
-                activeRequestIdRef.current ===
-                requestId
-              ) {
-                setState(
-                  'interrupted'
-                );
+            onInterrupted:
+              () => {
+                if (
+                  activeRequestIdRef.current ===
+                  requestId
+                ) {
+                  setState(
+                    'interrupted'
+                  );
 
-                setAudioLevel(0);
-              }
-            },
+                  setAudioLevel(
+                    0
+                  );
+                }
+              },
 
             onEnd: () => {
               if (
                 activeRequestIdRef.current ===
                 requestId
               ) {
-                console.log(
-                  `[JARVIS] TTS COMPLETED
-requestId: ${requestId}`
-                );
-
                 setState(
                   'idle'
                 );
 
-                setAudioLevel(0);
-
-                if (
-                  settings.autoListen
-                ) {
-                  setTimeout(
-                    () => {
-                      if (
-                        activeRequestIdRef.current ===
-                          requestId &&
-                        !isProcessingRef.current
-                      ) {
-                        handleActivateMic();
-                      }
-                    },
-                    200
-                  );
-                }
+                setAudioLevel(
+                  0
+                );
               }
             },
           },
 
           aiStartTime,
+
           requestId
         );
       }
 
       /* =====================================================
-         AI REQUEST
+         MAIN REQUEST
          ===================================================== */
 
       try {
-        console.log(
-          `[JARVIS] AI REQUEST SENT
-requestId: ${requestId}
-endpoint: ${apiUrl(
-            '/api/assistant/stream'
-          )}`
-        );
-
-        const memoryLimit =
-          settings.contextMemory ||
-          10;
-
-        const res =
+        const response =
           await fetch(
             apiUrl(
               '/api/assistant/stream'
@@ -915,20 +1147,25 @@ endpoint: ${apiUrl(
 
               body: JSON.stringify({
                 requestId,
+
                 prompt:
                   cleanPrompt,
 
                 history:
                   messages
                     .slice(
-                      -memoryLimit
+                      -(
+                        settings.contextMemory ||
+                        10
+                      )
                     )
                     .map(
-                      (m) => ({
+                      (message) => ({
                         role:
-                          m.role,
+                          message.role,
+
                         content:
-                          m.content,
+                          message.content,
                       })
                     ),
 
@@ -942,35 +1179,36 @@ endpoint: ${apiUrl(
           );
 
         /* ---------------------------------------------------
-           CHECK RESPONSE
+           RESPONSE VALIDATION
            --------------------------------------------------- */
 
         if (
-          !res.ok ||
-          !res.body
+          !response.ok ||
+          !response.body
         ) {
-          let serverMessage =
+          let errorText =
             '';
 
           try {
             const errorData =
-              await res.json();
+              await response.json();
 
-            serverMessage =
+            errorText =
               errorData?.error ||
               errorData?.message ||
               '';
-          } catch {}
+          } catch {
+            // Not JSON
+          }
 
           throw new Error(
-            serverMessage ||
-              `Server returned stream error: ${res.status}`
+            errorText ||
+              `Backend returned HTTP ${response.status}`
           );
         }
 
         console.log(
-          `[JARVIS] STREAM STARTED
-requestId: ${requestId}`
+          `[JARVIS] STREAM CONNECTED: ${requestId}`
         );
 
         /* ---------------------------------------------------
@@ -978,12 +1216,13 @@ requestId: ${requestId}`
            --------------------------------------------------- */
 
         const reader =
-          res.body.getReader();
+          response.body.getReader();
 
         const decoder =
           new TextDecoder();
 
-        let buffer = '';
+        let buffer =
+          '';
 
         while (true) {
           const {
@@ -1002,11 +1241,11 @@ requestId: ${requestId}`
             abortController.signal
               .aborted
           ) {
-            reader
-              .cancel()
-              .catch(
-                () => {}
-              );
+            try {
+              await reader.cancel();
+            } catch {
+              // Ignore
+            }
 
             return;
           }
@@ -1019,20 +1258,20 @@ requestId: ${requestId}`
               }
             );
 
-          const parts =
+          const blocks =
             buffer.split(
               '\n\n'
             );
 
           buffer =
-            parts.pop() ||
+            blocks.pop() ||
             '';
 
           for (
-            const chunk of parts
+            const block of blocks
           ) {
             const lines =
-              chunk.split('\n');
+              block.split('\n');
 
             for (
               const line of lines
@@ -1050,146 +1289,251 @@ requestId: ${requestId}`
                   .slice(6)
                   .trim();
 
-              if (!payload) {
+              if (
+                !payload
+              ) {
                 continue;
               }
 
+              let event: any;
+
               try {
-                const event =
+                event =
                   JSON.parse(
                     payload
                   );
+              } catch {
+                console.warn(
+                  '[JARVIS] Invalid SSE event'
+                );
 
-                /* -------------------------------------------
-                   TOKEN
-                   ------------------------------------------- */
+                continue;
+              }
+
+              /* ---------------------------------------------
+                 TOKEN
+                 --------------------------------------------- */
+
+              if (
+                event.type ===
+                  'token' &&
+                typeof event.delta ===
+                  'string'
+              ) {
+                accumulatedText +=
+                  event.delta;
 
                 if (
-                  event.type ===
-                    'token' &&
-                  typeof event.delta ===
-                    'string'
+                  !firstTokenReceived
                 ) {
-                  accumulatedText +=
-                    event.delta;
+                  firstTokenReceived =
+                    true;
 
-                  /* First token = AI has started */
-                  if (
-                    !hasStartedVoice
-                  ) {
-                    hasStartedVoice =
-                      true;
-
-                    console.log(
-                      `[JARVIS] FIRST TOKEN
-requestId: ${requestId}`
+                  const latency =
+                    Math.max(
+                      0.05,
+                      (
+                        performance.now() -
+                        aiStartTime
+                      ) /
+                        1000
                     );
 
-                    const firstTokenTime =
-                      performance.now();
+                  ttsService.setMetrics(
+                    {
+                      aiFirstTokenLatency:
+                        latency,
 
-                    const aiLatency =
-                      parseFloat(
-                        (
-                          (firstTokenTime -
-                            aiStartTime) /
-                          1000
-                        ).toFixed(
-                          2
-                        )
-                      );
-
-                    ttsService.setMetrics(
-                      {
-                        aiFirstTokenLatency:
-                          Math.max(
-                            0.05,
-                            aiLatency
-                          ),
-
-                        aiResponseTime:
-                          Math.max(
-                            0.05,
-                            aiLatency
-                          ),
-                      }
-                    );
-
-                    setState(
-                      'speaking'
-                    );
-
-                    soundFx.playProcessingPulse(
-                      settings.soundEffects
-                    );
-                  }
-
-                  /* -----------------------------------------
-                     PROGRESSIVE MESSAGE
-                     ----------------------------------------- */
-
-                  const progressiveMsg:
-                    Message = {
-                    id:
-                      assistantMsgId,
-
-                    role:
-                      'assistant',
-
-                    content:
-                      accumulatedText,
-
-                    sources:
-                      sourcesData,
-
-                    toolExecution:
-                      toolUsedData,
-
-                    timestamp:
-                      Date.now(),
-                  };
-
-                  setCurrentMessage(
-                    progressiveMsg
+                      aiResponseTime:
+                        latency,
+                    }
                   );
 
-                  /* -----------------------------------------
-                     STREAM TOKEN TO TTS
-                     ----------------------------------------- */
+                  setState(
+                    'speaking'
+                  );
 
-                  if (
-                    settings.voiceEnabled
-                  ) {
-                    streamingSpeaker.pushToken(
-                      event.delta
-                    );
-                  }
+                  console.log(
+                    `[JARVIS] FIRST TOKEN: ${requestId}`
+                  );
                 }
 
-                /* -------------------------------------------
-                   TOOL
-                   ------------------------------------------- */
+                const progressiveMessage:
+                  Message = {
+                  id:
+                    assistantMessageId,
 
-                else if (
-                  event.type ===
-                    'tool' &&
+                  role:
+                    'assistant',
+
+                  content:
+                    accumulatedText,
+
+                  sources:
+                    sourcesData,
+
+                  toolExecution:
+                    toolUsedData,
+
+                  timestamp:
+                    Date.now(),
+                };
+
+                setCurrentMessage(
+                  progressiveMessage
+                );
+
+                if (
+                  settings.voiceEnabled
+                ) {
+                  streamingSpeaker.pushToken(
+                    event.delta
+                  );
+                }
+              }
+
+              /* ---------------------------------------------
+                 TOOL
+                 --------------------------------------------- */
+
+              else if (
+                event.type ===
+                  'tool' &&
+                event.tool
+              ) {
+                toolUsedData = {
+                  name:
+                    event.tool.name,
+
+                  displayName:
+                    event.tool.name
+                      .replace(
+                        /_/g,
+                        ' '
+                      )
+                      .toUpperCase(),
+
+                  args:
+                    event.tool.args,
+
+                  result:
+                    event.tool.result,
+
+                  status:
+                    'success',
+                };
+
+                setActiveTool(
+                  toolUsedData
+                );
+
+                dispatchDesktopActionFromTool(
                   event.tool
+                );
+
+                if (
+                  event.tool.name ===
+                  'manage_stark_task'
+                ) {
+                  fetch(
+                    apiUrl(
+                      '/api/tasks'
+                    )
+                  )
+                    .then(
+                      (result) =>
+                        result.json()
+                    )
+                    .then(
+                      (data) => {
+                        setTasks(
+                          data.tasks ||
+                            []
+                        );
+                      }
+                    )
+                    .catch(
+                      () => {}
+                    );
+                }
+              }
+
+              /* ---------------------------------------------
+                 EXECUTION STEP
+                 --------------------------------------------- */
+
+              else if (
+                event.type ===
+                  'step' &&
+                event.step
+              ) {
+                setExecutionSteps(
+                  (previous) => [
+                    ...previous,
+                    {
+                      stage:
+                        'thinking',
+
+                      label:
+                        event.step,
+
+                      timestamp:
+                        Date.now(),
+                    },
+                  ]
+                );
+              }
+
+              /* ---------------------------------------------
+                 DONE
+                 --------------------------------------------- */
+
+              else if (
+                event.type ===
+                  'done'
+              ) {
+                if (
+                  event.reply &&
+                  !accumulatedText
+                ) {
+                  accumulatedText =
+                    event.reply;
+                }
+
+                if (
+                  Array.isArray(
+                    event.sources
+                  )
+                ) {
+                  sourcesData =
+                    event.sources;
+                }
+
+                if (
+                  event.toolUsed &&
+                  !toolUsedData
                 ) {
                   toolUsedData = {
                     name:
-                      event.tool.name,
+                      event.toolUsed
+                        .name,
 
                     displayName:
-                      event.tool.name.replace(
-                        /_/g,
-                        ' '
-                      ).toUpperCase(),
+                      event.toolUsed
+                        .name
+                        .replace(
+                          /_/g,
+                          ' '
+                        )
+                        .toUpperCase(),
 
                     args:
-                      event.tool.args,
+                      event.toolUsed
+                        .args,
 
                     result:
-                      event.tool.result,
+                      event.toolUsed
+                        .result,
 
                     status:
                       'success',
@@ -1200,147 +1544,31 @@ requestId: ${requestId}`
                   );
 
                   dispatchDesktopActionFromTool(
-                    event.tool
-                  );
-
-                  /* Refresh tasks */
-                  if (
-                    event.tool.name ===
-                    'manage_stark_task'
-                  ) {
-                    fetch(
-                      apiUrl(
-                        '/api/tasks'
-                      )
-                    )
-                      .then(
-                        (r) =>
-                          r.json()
-                      )
-                      .then(
-                        (d) =>
-                          setTasks(
-                            d.tasks ||
-                              []
-                          )
-                      )
-                      .catch(
-                        () => {}
-                      );
-                  }
-                }
-
-                /* -------------------------------------------
-                   EXECUTION STEP
-                   ------------------------------------------- */
-
-                else if (
-                  event.type ===
-                    'step' &&
-                  event.step
-                ) {
-                  setExecutionSteps(
-                    (prev) => [
-                      ...prev,
-                      {
-                        stage:
-                          'thinking',
-
-                        label:
-                          event.step,
-
-                        timestamp:
-                          Date.now(),
-                      },
-                    ]
+                    event.toolUsed
                   );
                 }
+              }
 
-                /* -------------------------------------------
-                   DONE
-                   ------------------------------------------- */
+              /* ---------------------------------------------
+                 SERVER ERROR
+                 --------------------------------------------- */
 
-                else if (
-                  event.type ===
-                    'done'
-                ) {
-                  if (
-                    event.reply &&
-                    !accumulatedText
-                  ) {
-                    accumulatedText =
-                      event.reply;
-                  }
-
-                  if (
-                    event.sources
-                  ) {
-                    sourcesData =
-                      event.sources;
-                  }
-
-                  if (
-                    event.toolUsed &&
-                    !toolUsedData
-                  ) {
-                    toolUsedData = {
-                      name:
-                        event
-                          .toolUsed
-                          .name,
-
-                      displayName:
-                        event
-                          .toolUsed
-                          .name
-                          .replace(
-                            /_/g,
-                            ' '
-                          )
-                          .toUpperCase(),
-
-                      args:
-                        event
-                          .toolUsed
-                          .args,
-
-                      result:
-                        event
-                          .toolUsed
-                          .result,
-
-                      status:
-                        'success',
-                    };
-
-                    setActiveTool(
-                      toolUsedData
-                    );
-
-                    dispatchDesktopActionFromTool(
-                      event.toolUsed
-                    );
-                  }
-                }
-              } catch (
-                parseError
+              else if (
+                event.type ===
+                  'error'
               ) {
-                console.warn(
-                  'Stream chunk parse error:',
-                  parseError
+                throw new Error(
+                  event.error ||
+                    event.message ||
+                    'AI stream error'
                 );
               }
             }
           }
         }
 
-        console.log(
-          `[JARVIS] STREAM COMPLETED
-requestId: ${requestId}`
-        );
-
         /* ---------------------------------------------------
-           REQUEST STILL ACTIVE?
+           VERIFY REQUEST
            --------------------------------------------------- */
 
         if (
@@ -1353,7 +1581,7 @@ requestId: ${requestId}`
         }
 
         /* ---------------------------------------------------
-           FINISH TTS STREAM
+           FINISH TTS
            --------------------------------------------------- */
 
         if (
@@ -1368,10 +1596,10 @@ requestId: ${requestId}`
            FINAL ASSISTANT MESSAGE
            --------------------------------------------------- */
 
-        const finalAssistantMsg:
+        const finalMessage:
           Message = {
           id:
-            assistantMsgId,
+            assistantMessageId,
 
           role:
             'assistant',
@@ -1390,38 +1618,39 @@ requestId: ${requestId}`
             Date.now(),
         };
 
-        setMessages((prev) => {
-          const idx =
-            prev.findIndex(
-              (m) =>
-                m.id ===
-                assistantMsgId
-            );
+        setMessages(
+          (previous) => {
+            const index =
+              previous.findIndex(
+                (message) =>
+                  message.id ===
+                  assistantMessageId
+              );
 
-          if (idx >= 0) {
-            const updated =
-              [...prev];
+            if (index >= 0) {
+              const updated =
+                [...previous];
 
-            updated[idx] =
-              finalAssistantMsg;
+              updated[index] =
+                finalMessage;
 
-            return updated;
+              return updated;
+            }
+
+            return [
+              ...previous,
+              finalMessage,
+            ];
           }
+        );
 
-          return [
-            ...prev,
-            finalAssistantMsg,
-          ];
-        });
-
-        /* Remove progressive duplicate */
         setCurrentMessage(
           null
         );
 
         setExecutionSteps(
-          (prev) => [
-            ...prev,
+          (previous) => [
+            ...previous,
             {
               stage:
                 'completed',
@@ -1436,241 +1665,53 @@ requestId: ${requestId}`
         );
 
         console.log(
-          `[JARVIS] REQUEST FINISHED
-requestId: ${requestId}`
+          `[JARVIS] REQUEST COMPLETED: ${requestId}`
         );
       }
 
       /* =====================================================
-         STREAM ERROR → FALLBACK ENDPOINT
+         CATCH
          ===================================================== */
 
-      catch (err: any) {
+      catch (error: any) {
         if (
-          err.name ===
+          error?.name ===
             'AbortError' ||
           activeRequestIdRef.current !==
             requestId
         ) {
           console.log(
-            `[JARVIS] Request aborted: ${requestId}`
+            `[JARVIS] REQUEST ABORTED: ${requestId}`
           );
 
           return;
         }
 
         console.warn(
-          'Streaming failed. Using standard assistant endpoint:',
-          err
+          '[JARVIS] STREAM ERROR:',
+          error
         );
 
-        try {
-          const fbRes =
-            await fetch(
-              apiUrl(
-                '/api/assistant/interact'
-              ),
-              {
-                method: 'POST',
+        /* ---------------------------------------------------
+           FALLBACK
+           --------------------------------------------------- */
 
-                headers: {
-                  'Content-Type':
-                    'application/json',
-                },
+        const fallbackSucceeded =
+          await runFallbackRequest(
+            requestId,
+            assistantMessageId,
+            cleanPrompt,
+            abortController
+          );
 
-                body: JSON.stringify({
-                  requestId,
-
-                  prompt:
-                    cleanPrompt,
-
-                  history:
-                    messages
-                      .slice(-4)
-                      .map(
-                        (m) => ({
-                          role:
-                            m.role,
-
-                          content:
-                            m.content,
-                        })
-                      ),
-
-                  style:
-                    settings.aiStyle,
-                }),
-
-                signal:
-                  abortController.signal,
-              }
-            );
-
-          if (
-            fbRes.ok &&
-            activeRequestIdRef.current ===
-              requestId
-          ) {
-            const fbData =
-              await fbRes.json();
-
-            const fallbackMsg:
-              Message = {
-              id:
-                assistantMsgId,
-
-              role:
-                'assistant',
-
-              content:
-                fbData.reply ||
-                'Directive processed, sir.',
-
-              sources:
-                fbData.sources,
-
-              toolExecution:
-                fbData.toolUsed
-                  ? {
-                      name:
-                        fbData
-                          .toolUsed
-                          .name,
-
-                      displayName:
-                        fbData
-                          .toolUsed
-                          .name
-                          .replace(
-                            /_/g,
-                            ' '
-                          )
-                          .toUpperCase(),
-
-                      args:
-                        fbData
-                          .toolUsed
-                          .args,
-
-                      result:
-                        fbData
-                          .toolUsed
-                          .result,
-
-                      status:
-                        'success',
-                    }
-                  : undefined,
-
-              timestamp:
-                Date.now(),
-            };
-
-            setMessages(
-              (prev) => {
-                const idx =
-                  prev.findIndex(
-                    (m) =>
-                      m.id ===
-                      assistantMsgId
-                  );
-
-                if (idx >= 0) {
-                  const updated =
-                    [...prev];
-
-                  updated[idx] =
-                    fallbackMsg;
-
-                  return updated;
-                }
-
-                return [
-                  ...prev,
-                  fallbackMsg,
-                ];
-              }
-            );
-
-            setCurrentMessage(
-              null
-            );
-
-            if (
-              fbData.toolUsed
-            ) {
-              dispatchDesktopActionFromTool(
-                fbData.toolUsed
-              );
-            }
-
-            if (
-              settings.voiceEnabled
-            ) {
-              setState(
-                'speaking'
-              );
-
-              speakJarvis(
-                fbData.reply ||
-                  'Directive processed, sir.',
-                {
-                  pitch:
-                    settings.voicePitch,
-
-                  rate:
-                    settings.voiceRate,
-
-                  volume:
-                    settings.voiceVolume,
-
-                  preferredVoice:
-                    settings.preferredVoice,
-
-                  onAudioLevel:
-                    (lvl) =>
-                      setAudioLevel(
-                        lvl
-                      ),
-
-                  onEnd: () => {
-                    setState(
-                      'idle'
-                    );
-
-                    setAudioLevel(
-                      0
-                    );
-                  },
-                },
-                requestId
-              );
-            } else {
-              setState('idle');
-            }
-
-            console.log(
-              `[JARVIS] FALLBACK REQUEST FINISHED
-requestId: ${requestId}`
-            );
-
-            return;
-          }
-        } catch (
-          fallbackError: any
+        if (
+          fallbackSucceeded
         ) {
-          if (
-            fallbackError.name ===
-              'AbortError' ||
-            activeRequestIdRef.current !==
-              requestId
-          ) {
-            return;
-          }
+          return;
         }
 
         /* ---------------------------------------------------
-           FINAL ERROR
+           ERROR MESSAGE
            --------------------------------------------------- */
 
         if (
@@ -1683,43 +1724,43 @@ requestId: ${requestId}`
             settings.soundEffects
           );
 
-          const errorMsg:
+          const errorMessage:
             Message = {
             id:
-              assistantMsgId,
+              assistantMessageId,
 
             role:
               'assistant',
 
             content:
-              `My apologies, sir. The J.A.R.V.I.S. backend is currently unavailable. Please verify the backend connection.`,
+              'My apologies, sir. The J.A.R.V.I.S. backend is currently unavailable. Please verify the Render backend URL and server status.',
 
             timestamp:
               Date.now(),
           };
 
           setMessages(
-            (prev) => {
-              const idx =
-                prev.findIndex(
-                  (m) =>
-                    m.id ===
-                    assistantMsgId
+            (previous) => {
+              const index =
+                previous.findIndex(
+                  (message) =>
+                    message.id ===
+                    assistantMessageId
                 );
 
-              if (idx >= 0) {
+              if (index >= 0) {
                 const updated =
-                  [...prev];
+                  [...previous];
 
-                updated[idx] =
-                  errorMsg;
+                updated[index] =
+                  errorMessage;
 
                 return updated;
               }
 
               return [
-                ...prev,
-                errorMsg,
+                ...previous,
+                errorMessage,
               ];
             }
           );
@@ -1728,44 +1769,44 @@ requestId: ${requestId}`
             null
           );
 
-          setTimeout(
-            () => {
-              if (
-                activeRequestIdRef.current ===
-                requestId
-              ) {
-                setState('idle');
-              }
-            },
-            1000
-          );
+          setTimeout(() => {
+            if (
+              activeRequestIdRef.current ===
+              requestId
+            ) {
+              setState(
+                'idle'
+              );
+            }
+          }, 1500);
         }
       }
-    } finally {
-      /* -----------------------------------------------------
-         RELEASE REQUEST LOCK
-         ----------------------------------------------------- */
 
-      if (
-        activeRequestIdRef.current ===
-        requestId
-      ) {
-        isProcessingRef.current =
-          false;
+      /* =====================================================
+         FINALLY
+         ===================================================== */
 
-        activePromptNormalizedRef.current =
-          null;
-
+      finally {
         if (
-          activeAbortControllerRef.current ===
-          abortController
+          activeRequestIdRef.current ===
+          requestId
         ) {
-          activeAbortControllerRef.current =
+          isProcessingRef.current =
+            false;
+
+          activePromptNormalizedRef.current =
             null;
+
+          if (
+            activeAbortControllerRef.current ===
+            abortController
+          ) {
+            activeAbortControllerRef.current =
+              null;
+          }
         }
       }
-    }
-  };
+    };
 
   /* =========================================================
      MICROPHONE
@@ -1811,6 +1852,8 @@ requestId: ${requestId}`
 
       stopSpeechRecognition();
 
+      ttsService.unlockAudioContext();
+
       soundFx.playReactorCharge(
         settings.soundEffects
       );
@@ -1838,65 +1881,76 @@ requestId: ${requestId}`
             return;
           }
 
+          const finalText =
+            transcript.trim();
+
+          if (!finalText) {
+            return;
+          }
+
           setLiveTranscript(
-            transcript
+            finalText
           );
 
           stopSpeechRecognition();
 
           processDirective(
-            transcript.trim()
+            finalText
           );
         },
 
-        onAudioLevel: (
-          lvl
-        ) => {
-          setAudioLevel(
-            lvl
-          );
-        },
+        onAudioLevel:
+          (level) => {
+            setAudioLevel(
+              level
+            );
+          },
 
-        onError: (
-          err
-        ) => {
-          console.warn(
-            'Speech recognition error:',
-            err
-          );
+        onError:
+          (error) => {
+            console.warn(
+              'Speech recognition error:',
+              error
+            );
 
-          setState('error');
-
-          soundFx.playError(
-            settings.soundEffects
-          );
-
-          setTimeout(
-            () =>
+            if (
+              !isProcessingRef.current
+            ) {
               setState(
-                'idle'
-              ),
-            1800
-          );
-        },
+                'error'
+              );
+
+              soundFx.playError(
+                settings.soundEffects
+              );
+
+              setTimeout(() => {
+                if (
+                  !isProcessingRef.current
+                ) {
+                  setState(
+                    'idle'
+                  );
+                }
+              }, 1800);
+            }
+          },
 
         onEnd: () => {
           /*
-           * IMPORTANT:
-           * Do not submit anything here.
            * Final speech is submitted only
-           * from onResult(..., true).
+           * through onResult(..., true).
            */
 
           if (
             !isProcessingRef.current
           ) {
             setState(
-              (curr) =>
-                curr ===
+              (current) =>
+                current ===
                 'listening'
                   ? 'idle'
-                  : curr
+                  : current
             );
 
             setAudioLevel(0);
@@ -1906,35 +1960,44 @@ requestId: ${requestId}`
     };
 
   /* =========================================================
-     KEYBOARD SHORTCUT
+     SPACEBAR
      ========================================================= */
 
   useEffect(() => {
     const handleKeyDown =
-      (e: KeyboardEvent) => {
+      (event: KeyboardEvent) => {
         if (
-          e.code ===
-            'Space' &&
-          (e.target ===
-            document.body ||
-            (e.target as HTMLElement)
-              .tagName ===
-              'BODY')
+          event.code !==
+          'Space'
         ) {
-          e.preventDefault();
+          return;
+        }
 
-          if (
-            state === 'idle'
-          ) {
-            handleActivateMic();
-          } else if (
-            state ===
-              'listening' ||
-            state ===
-              'speaking'
-          ) {
-            handleStop();
-          }
+        const target =
+          event.target as HTMLElement;
+
+        const typing =
+          target?.tagName ===
+            'INPUT' ||
+          target?.tagName ===
+            'TEXTAREA' ||
+          target?.isContentEditable;
+
+        if (typing) {
+          return;
+        }
+
+        event.preventDefault();
+
+        if (
+          state === 'idle'
+        ) {
+          handleActivateMic();
+        } else if (
+          state === 'listening' ||
+          state === 'speaking'
+        ) {
+          handleStop();
         }
       };
 
@@ -1943,11 +2006,12 @@ requestId: ${requestId}`
       handleKeyDown
     );
 
-    return () =>
+    return () => {
       window.removeEventListener(
         'keydown',
         handleKeyDown
       );
+    };
   }, [
     state,
     settings.soundEffects,
@@ -1955,7 +2019,7 @@ requestId: ${requestId}`
   ]);
 
   /* =========================================================
-     TASK ACTIONS
+     ADD TASK
      ========================================================= */
 
   const handleAddTask =
@@ -1968,7 +2032,7 @@ requestId: ${requestId}`
         | 'high';
     }) => {
       try {
-        const res =
+        const response =
           await fetch(
             apiUrl('/api/tasks'),
             {
@@ -1986,9 +2050,11 @@ requestId: ${requestId}`
             }
           );
 
-        if (res.ok) {
+        if (
+          response.ok
+        ) {
           const data =
-            await res.json();
+            await response.json();
 
           setTasks(
             data.tasks || []
@@ -1998,13 +2064,17 @@ requestId: ${requestId}`
             settings.soundEffects
           );
         }
-      } catch (e) {
+      } catch (error) {
         console.warn(
           'Add task error:',
-          e
+          error
         );
       }
     };
+
+  /* =========================================================
+     TOGGLE TASK
+     ========================================================= */
 
   const handleToggleTask =
     async (
@@ -2012,7 +2082,7 @@ requestId: ${requestId}`
       completed: boolean
     ) => {
       try {
-        const res =
+        const response =
           await fetch(
             apiUrl(
               `/api/tasks/${id}`
@@ -2032,9 +2102,11 @@ requestId: ${requestId}`
             }
           );
 
-        if (res.ok) {
+        if (
+          response.ok
+        ) {
           const data =
-            await res.json();
+            await response.json();
 
           setTasks(
             data.tasks || []
@@ -2044,18 +2116,22 @@ requestId: ${requestId}`
             settings.soundEffects
           );
         }
-      } catch (e) {
+      } catch (error) {
         console.warn(
           'Toggle task error:',
-          e
+          error
         );
       }
     };
 
+  /* =========================================================
+     DELETE TASK
+     ========================================================= */
+
   const handleDeleteTask =
     async (id: string) => {
       try {
-        const res =
+        const response =
           await fetch(
             apiUrl(
               `/api/tasks/${id}`
@@ -2066,9 +2142,11 @@ requestId: ${requestId}`
             }
           );
 
-        if (res.ok) {
+        if (
+          response.ok
+        ) {
           const data =
-            await res.json();
+            await response.json();
 
           setTasks(
             data.tasks || []
@@ -2078,10 +2156,10 @@ requestId: ${requestId}`
             settings.soundEffects
           );
         }
-      } catch (e) {
+      } catch (error) {
         console.warn(
           'Delete task error:',
-          e
+          error
         );
       }
     };
@@ -2100,21 +2178,25 @@ requestId: ${requestId}`
 
       setLiveTranscript('');
 
+      setActiveTool(
+        undefined
+      );
+
+      setExecutionSteps([]);
+
       soundFx.playClick(
         settings.soundEffects
       );
     };
 
   /* =========================================================
-     UI
+     RENDER
      ========================================================= */
 
   return (
     <div className="min-h-screen w-full flex flex-col justify-between relative overflow-x-hidden bg-[#020408] text-cyan-400 select-none scanlines">
 
-      {/* ---------------------------------------------------
-          BOOT SEQUENCE
-          --------------------------------------------------- */}
+      {/* BOOT */}
 
       {isBooting && (
         <BootSequence
@@ -2124,9 +2206,7 @@ requestId: ${requestId}`
         />
       )}
 
-      {/* ---------------------------------------------------
-          BACKGROUND ENERGY FIELD
-          --------------------------------------------------- */}
+      {/* BACKGROUND */}
 
       <div className="fixed inset-0 pointer-events-none z-0">
 
@@ -2136,25 +2216,23 @@ requestId: ${requestId}`
 
       </div>
 
-      {/* ---------------------------------------------------
-          TOP HEADER
-          --------------------------------------------------- */}
+      {/* TOP BAR */}
 
       <JarvisTopBar
         onOpenSettings={() =>
-          setIsSettingsOpen(true)
+          setIsSettingsOpen(
+            true
+          )
         }
       />
 
-      {/* ---------------------------------------------------
-          MAIN HUD
-          --------------------------------------------------- */}
+      {/* MAIN HUD */}
 
       <div className="flex-1 w-full max-w-[1560px] mx-auto p-2 sm:p-3.5 relative z-10">
 
         <div className="relative w-full h-full p-2 sm:p-3 rounded-lg border border-cyan-500/20 bg-[#020612]/70 backdrop-blur-md shadow-[0_0_30px_rgba(0,240,255,0.03)]">
 
-          {/* Corner brackets */}
+          {/* CORNER BRACKETS */}
 
           <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-cyan-400 pointer-events-none" />
 
@@ -2164,41 +2242,47 @@ requestId: ${requestId}`
 
           <div className="absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 border-cyan-400 pointer-events-none" />
 
-          {/* -------------------------------------------------
-              THREE COLUMN HUD
-              ------------------------------------------------- */}
+          {/* THREE COLUMNS */}
 
           <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] xl:grid-cols-[310px_1fr_310px] 2xl:grid-cols-[330px_1fr_330px] gap-3 lg:gap-4 items-start">
 
-            {/* LEFT COLUMN */}
+            {/* LEFT */}
 
             <div className="flex justify-center w-full">
 
               <JarvisLeftColumn
-                state={state}
+                state={
+                  state
+                }
+
                 audioLevel={
                   audioLevel
                 }
+
                 onOpenTasks={() =>
                   setIsTasksOpen(
                     true
                   )
                 }
+
                 onOpenHistory={() =>
                   setIsHistoryOpen(
                     true
                   )
                 }
+
                 onOpenSystemInfo={() =>
                   setIsSystemInfoOpen(
                     true
                   )
                 }
+
                 onOpenSettings={() =>
                   setIsSettingsOpen(
                     true
                   )
                 }
+
                 onToggleMic={
                   handleActivateMic
                 }
@@ -2206,56 +2290,77 @@ requestId: ${requestId}`
 
             </div>
 
-            {/* CENTER COLUMN */}
+            {/* CENTER */}
 
             <div className="flex justify-center w-full">
 
               <JarvisCenterColumn
-                state={state}
+                state={
+                  state
+                }
+
                 audioLevel={
                   audioLevel
                 }
+
                 messages={
                   messages
                 }
+
                 currentMessage={
                   currentMessage
                 }
+
                 activeTool={
                   activeTool
                 }
+
                 desktopAction={
                   desktopAction
                 }
+
                 liveTranscript={
                   liveTranscript
                 }
+
                 isAutoplayBlocked={
                   isAutoplayBlocked
                 }
+
                 onDismissAutoplay={() =>
                   setIsAutoplayBlocked(
                     false
                   )
                 }
+
                 onActivateMic={
                   handleActivateMic
                 }
+
                 onStop={
                   handleStop
                 }
+
                 onSubmitText={
                   processDirective
                 }
-                onSelectState={(s) =>
-                  setState(s)
+
+                onSelectState={(
+                  selectedState
+                ) =>
+                  setState(
+                    selectedState
+                  )
                 }
+
                 reactorIntensity={
                   settings.reactorIntensity
                 }
+
                 animationSpeed={
                   settings.animationSpeed
                 }
+
                 reducedMotion={
                   settings.reducedMotion
                 }
@@ -2263,7 +2368,7 @@ requestId: ${requestId}`
 
             </div>
 
-            {/* RIGHT COLUMN */}
+            {/* RIGHT */}
 
             <div className="flex justify-center w-full">
 
@@ -2273,6 +2378,7 @@ requestId: ${requestId}`
                     true
                   )
                 }
+
                 onOpenSystemInfo={() =>
                   setIsSystemInfoOpen(
                     true
@@ -2292,97 +2398,103 @@ requestId: ${requestId}`
           MODALS
           ===================================================== */}
 
-      {/* Conversation History */}
-
       <ConversationHistoryModal
         isOpen={
           isHistoryOpen
         }
+
         onClose={() =>
           setIsHistoryOpen(
             false
           )
         }
+
         messages={
           messages
         }
+
         onClearHistory={
           handleClearHistory
         }
       />
 
-      {/* Settings */}
-
       <SettingsModal
         isOpen={
           isSettingsOpen
         }
+
         onClose={() =>
           setIsSettingsOpen(
             false
           )
         }
+
         settings={
           settings
         }
+
         onSaveSettings={
           setSettings
         }
+
         telemetry={
           telemetry
         }
       />
-
-      {/* System Information */}
 
       <SystemInfoModal
         isOpen={
           isSystemInfoOpen
         }
+
         onClose={() =>
           setIsSystemInfoOpen(
             false
           )
         }
+
         telemetry={
           telemetry
         }
+
         onReplayBoot={
           handleReplayBoot
         }
       />
 
-      {/* Tasks */}
-
       <TaskTrackerModal
         isOpen={
           isTasksOpen
         }
+
         onClose={() =>
           setIsTasksOpen(
             false
           )
         }
+
         tasks={
           tasks
         }
+
         onAddTask={
           handleAddTask
         }
+
         onToggleTask={
           handleToggleTask
         }
+
         onDeleteTask={
           handleDeleteTask
         }
       />
 
-      {/* Desktop Agent */}
-
       <DesktopAgentModal
         isOpen={
           isDesktopModalOpen
         }
+
         onClose={() =>
           setIsDesktopModalOpen(
             false
@@ -2390,17 +2502,17 @@ requestId: ${requestId}`
         }
       />
 
-      {/* Running Applications */}
-
       <RunningAppsModal
         isOpen={
           isRunningAppsOpen
         }
+
         onClose={() =>
           setIsRunningAppsOpen(
             false
           )
         }
+
         onOpenAgentSetup={() => {
           setIsRunningAppsOpen(
             false
@@ -2410,6 +2522,7 @@ requestId: ${requestId}`
             true
           );
         }}
+
         onLaunchApp={(
           appId
         ) =>
@@ -2417,6 +2530,7 @@ requestId: ${requestId}`
             appId
           )
         }
+
         onRequestCloseApp={(
           appId
         ) =>
